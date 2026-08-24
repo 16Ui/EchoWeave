@@ -442,9 +442,9 @@ class AgentSessionRuntime:
             if callable(bind_model):
                 bind_model(self.model_client)
 
-    def _begin_turn_context(self) -> None:
-        self._active_turn_id = str(uuid4())
-        self._active_trace_id = str(uuid4())
+    def _begin_turn_context(self, turn_id: str | None = None, trace_id: str | None = None) -> None:
+        self._active_turn_id = turn_id or str(uuid4())
+        self._active_trace_id = trace_id or str(uuid4())
         self._event_seq = 0
 
     def _infer_tool_workspace(self) -> str | None:
@@ -1024,6 +1024,9 @@ class AgentSessionRuntime:
         history: list[dict[str, Any]],
         user_input: str,
         summary: str | None = None,
+        *,
+        turn_id: str | None = None,
+        trace_id: str | None = None,
     ) -> tuple[str, list[dict[str, Any]], str | None]:
         """
         执行单轮对话主链。
@@ -1037,7 +1040,7 @@ class AgentSessionRuntime:
         """
         session_state = self.session_store.load_snapshot(session_path)
         session_id = session_state.header.id
-        self._begin_turn_context()
+        self._begin_turn_context(turn_id=turn_id, trace_id=trace_id)
         user_message = {"role": "user", "content": sanitize_value(user_input)}
         history = [*history, user_message]
         self.session_store.append(session_path, "message", user_message)

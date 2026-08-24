@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from echoweave_agent_core import AgentCore, AgentCoreConfig, TurnRequest, TurnResult
+from echoweave_agent_core import AgentCore, AgentCoreConfig, TurnOutcome, TurnRequest, TurnResult
 from echoweave_runtime.app import build_registry
 from echoweave_runtime.extensions.manager import ExtensionManager, build_extension_manager
 from echoweave_runtime.models.base import ModelClient
@@ -73,7 +73,22 @@ class CodingAgent:
         resume: bool = True,
         metadata: dict[str, Any] | None = None,
     ) -> TurnResult:
-        return self.core.run_turn(
+        return self.execute(
+            prompt,
+            session_path=session_path,
+            resume=resume,
+            metadata=metadata,
+        ).require_result()
+
+    def execute(
+        self,
+        prompt: str,
+        *,
+        session_path: str | Path | None = None,
+        resume: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> TurnOutcome:
+        return self.core.execute_turn(
             TurnRequest(
                 prompt=prompt,
                 session_path=Path(session_path) if session_path is not None else None,

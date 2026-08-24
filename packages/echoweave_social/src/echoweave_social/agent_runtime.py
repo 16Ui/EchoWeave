@@ -241,7 +241,7 @@ class EchoWeaveSocialAgent:
                     },
                 )
             )
-            turn = core.run_turn(
+            outcome = core.execute_turn(
                 TurnRequest(
                     prompt=prompt,
                     session_path=session_path,
@@ -257,6 +257,7 @@ class EchoWeaveSocialAgent:
                     },
                 )
             )
+            turn = outcome.require_result()
             reply = turn.text
         except Exception as exc:
             record_audit(

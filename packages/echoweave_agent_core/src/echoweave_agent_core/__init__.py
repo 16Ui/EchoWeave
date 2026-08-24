@@ -6,6 +6,15 @@
 
 from echoweave_agent_core.core import AgentCore
 from echoweave_agent_core.hooks import AgentCoreHook, AgentCoreHookBase, CoreTurnContext
+from echoweave_agent_core.outcomes import (
+    InvalidTurnTransition,
+    TurnExecutionError,
+    TurnFailure,
+    TurnFailureKind,
+    TurnOutcome,
+    TurnState,
+    TurnStateMachine,
+)
 from echoweave_agent_core.sessions import (
     SessionRuntimeFacade,
     empty_tool_execution_stats,
@@ -25,8 +34,15 @@ __all__ = [
     "AgentSessionRuntime",
     "CoreTurnContext",
     "SessionRuntimeFacade",
+    "InvalidTurnTransition",
+    "TurnExecutionError",
+    "TurnFailure",
+    "TurnFailureKind",
+    "TurnOutcome",
     "TurnRequest",
     "TurnResult",
+    "TurnState",
+    "TurnStateMachine",
     "build_runtime",
     "empty_tool_execution_stats",
     "list_session_items",

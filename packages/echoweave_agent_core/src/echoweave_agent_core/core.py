@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from echoweave_agent_core.hooks import CoreTurnContext
+from echoweave_agent_core.outcomes import (
+    TurnOutcome,
+    TurnState,
+    TurnStateMachine,
+    classify_turn_failure,
+)
 from echoweave_agent_core.sessions import (
     SessionRuntimeFacade,
     list_session_items,
@@ -53,64 +62,211 @@ class AgentCore:
         return cls(runtime, config.session_store, hooks=config.hooks, metadata=config.metadata)
 
     def run_turn(self, request: TurnRequest) -> TurnResult:
-        session_path = self._resolve_turn_session(request)
-        snapshot = self.session_store.load_snapshot(session_path)
-        session_id = snapshot.header.id
-        metadata = {**self.metadata, **request.metadata}
-        context = CoreTurnContext(session_path=session_path, session_id=session_id, metadata=metadata)
-        request = self._run_before_turn_hooks(context, request)
-        history = request.history if request.history is not None else snapshot.history
-        summary = request.summary if request.summary is not None else snapshot.summary
+        """Compatibility API: return the result and re-raise the original failure."""
+        return self._execute_turn(request, create_checkpoint=False).require_result()
+
+    def execute_turn(self, request: TurnRequest) -> TurnOutcome:
+        """Execute a durable turn and describe success or failure without raising."""
+        return self._execute_turn(request, create_checkpoint=True)
+
+    def _execute_turn(self, request: TurnRequest, *, create_checkpoint: bool) -> TurnOutcome:
+        turn_id = str(uuid4())
+        trace_id = str(uuid4())
+        started_at = _utc_now_iso()
         started = time.perf_counter()
-        record_runtime_audit(
-            "agent_core",
-            "turn",
-            status="start",
-            session_id=session_id,
-            workspace=metadata.get("workspace"),
-            metadata={
-                "prompt_chars": len(request.prompt),
-                "resume": request.resume,
-                **_audit_metadata(metadata),
-            },
-        )
+        machine = TurnStateMachine()
+        session_path: Path | None = None
+        session_id: str | None = None
+        checkpoint: dict[str, Any] | None = None
+        metadata = {**self.metadata, **request.metadata}
+        context: CoreTurnContext | None = None
+        stage = "session"
         try:
+            session_path = self._resolve_turn_session(request)
+            snapshot = self.session_store.load_snapshot(session_path)
+            session_id = snapshot.header.id
+            context = CoreTurnContext(session_path=session_path, session_id=session_id, metadata=metadata)
+            stage = "state_persist"
+            self._append_turn_state(
+                session_path,
+                turn_id=turn_id,
+                trace_id=trace_id,
+                previous=None,
+                current=TurnState.CREATED,
+                sequence=0,
+            )
+
+            stage = "before_hook"
+            request = self._run_before_turn_hooks(context, request)
+            history = request.history if request.history is not None else snapshot.history
+            summary = request.summary if request.summary is not None else snapshot.summary
+            previous, current = machine.state, TurnState.RUNNING
+            stage = "state_persist"
+            self._append_turn_state(
+                session_path,
+                turn_id=turn_id,
+                trace_id=trace_id,
+                previous=previous,
+                current=current,
+                sequence=1,
+            )
+            machine.transition(TurnState.RUNNING)
+            record_runtime_audit(
+                "agent_core",
+                "turn",
+                status="start",
+                session_id=session_id,
+                workspace=metadata.get("workspace"),
+                metadata={
+                    "turn_id": turn_id,
+                    "trace_id": trace_id,
+                    "prompt_chars": len(request.prompt),
+                    "resume": request.resume,
+                    "recoverable": create_checkpoint,
+                    **_audit_metadata(metadata),
+                },
+            )
+            if create_checkpoint:
+                stage = "checkpoint"
+                checkpoint = self.session_store.create_checkpoint(
+                    session_path,
+                    label=f"turn:{turn_id}:start",
+                    turn_id=turn_id,
+                    trace_id=trace_id,
+                )
+
+            stage = "runtime"
             text, next_history, next_summary = self.runtime.run_turn(
                 session_path,
                 history,
                 request.prompt,
                 summary,
+                turn_id=turn_id,
+                trace_id=trace_id,
             )
-        except Exception as exc:
-            self._run_error_hooks(context, request, exc)
+
+            result = TurnResult(
+                text=text,
+                session_path=session_path,
+                session_id=session_id,
+                history=next_history,
+                summary=next_summary,
+                metadata={
+                    **metadata,
+                    "turn_id": turn_id,
+                    "trace_id": trace_id,
+                    "checkpoint_id": checkpoint.get("id") if checkpoint else None,
+                },
+            )
+            stage = "after_hook"
+            result = self._run_after_turn_hooks(context, request, result)
+            previous, current = machine.state, TurnState.COMPLETED
+            stage = "state_persist"
+            self._append_turn_state(
+                session_path,
+                turn_id=turn_id,
+                trace_id=trace_id,
+                previous=previous,
+                current=current,
+                sequence=2,
+                checkpoint_id=checkpoint.get("id") if checkpoint else None,
+            )
+            machine.transition(TurnState.COMPLETED)
+            latency_ms = (time.perf_counter() - started) * 1000
+            record_runtime_audit(
+                "agent_core",
+                "turn",
+                status="ok",
+                session_id=session_id,
+                workspace=metadata.get("workspace"),
+                latency_ms=latency_ms,
+                metadata={
+                    "turn_id": turn_id,
+                    "trace_id": trace_id,
+                    "reply_chars": len(text or ""),
+                    **_audit_metadata(metadata),
+                },
+            )
+            return TurnOutcome(
+                turn_id=turn_id,
+                trace_id=trace_id,
+                state=machine.state,
+                started_at=started_at,
+                finished_at=_utc_now_iso(),
+                latency_ms=latency_ms,
+                session_path=session_path,
+                session_id=session_id,
+                checkpoint=checkpoint,
+                result=result,
+                metadata=metadata,
+            )
+        except (Exception, asyncio.CancelledError) as exc:
+            failure = classify_turn_failure(exc, stage)
+            target = (
+                TurnState.TIMED_OUT
+                if failure.kind.value == "timeout"
+                else TurnState.CANCELLED
+                if failure.kind.value == "cancelled"
+                else TurnState.FAILED
+            )
+            if context is not None and isinstance(exc, Exception):
+                try:
+                    self._run_error_hooks(context, request, exc)
+                except Exception as hook_error:
+                    metadata = {
+                        **metadata,
+                        "error_hook_failure": f"{type(hook_error).__name__}: {hook_error}",
+                    }
+            if not machine.state.terminal:
+                previous, current = machine.state, target
+                if session_path is not None:
+                    try:
+                        self._append_turn_state(
+                            session_path,
+                            turn_id=turn_id,
+                            trace_id=trace_id,
+                            previous=previous,
+                            current=current,
+                            sequence=1 if previous is TurnState.CREATED else 2,
+                            checkpoint_id=checkpoint.get("id") if checkpoint else None,
+                            failure=failure.to_dict(),
+                        )
+                    except Exception as persist_error:
+                        metadata = {
+                            **metadata,
+                            "state_persist_failure": f"{type(persist_error).__name__}: {persist_error}",
+                        }
+                machine.transition(target)
+            latency_ms = (time.perf_counter() - started) * 1000
             record_runtime_audit(
                 "agent_core",
                 "turn",
                 status="error",
                 session_id=session_id,
                 workspace=metadata.get("workspace"),
-                latency_ms=(time.perf_counter() - started) * 1000,
-                metadata={"reason": str(exc), **_audit_metadata(metadata)},
+                latency_ms=latency_ms,
+                metadata={
+                    "turn_id": turn_id,
+                    "trace_id": trace_id,
+                    "reason": str(exc),
+                    "failure_kind": failure.kind.value,
+                    "failure_stage": failure.stage,
+                    **_audit_metadata(metadata),
+                },
             )
-            raise
-        record_runtime_audit(
-            "agent_core",
-            "turn",
-            status="ok",
-            session_id=session_id,
-            workspace=metadata.get("workspace"),
-            latency_ms=(time.perf_counter() - started) * 1000,
-            metadata={"reply_chars": len(text or ""), **_audit_metadata(metadata)},
-        )
-        result = TurnResult(
-            text=text,
-            session_path=session_path,
-            session_id=session_id,
-            history=next_history,
-            summary=next_summary,
-            metadata=metadata,
-        )
-        return self._run_after_turn_hooks(context, request, result)
+            return TurnOutcome(
+                turn_id=turn_id,
+                trace_id=trace_id,
+                state=machine.state,
+                started_at=started_at,
+                finished_at=_utc_now_iso(),
+                latency_ms=latency_ms,
+                session_path=session_path,
+                session_id=session_id,
+                checkpoint=checkpoint,
+                failure=failure,
+                metadata=metadata,
+            )
 
     def resume(self) -> Path:
         return resolve_session_path(self.session_store, resume=True)
@@ -210,6 +366,31 @@ class AgentCore:
             if callable(on_turn_error):
                 on_turn_error(context, request, error)
 
+    def _append_turn_state(
+        self,
+        session_path: Path,
+        *,
+        turn_id: str,
+        trace_id: str,
+        previous: TurnState | None,
+        current: TurnState,
+        sequence: int,
+        checkpoint_id: str | None = None,
+        failure: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "turn_id": turn_id,
+            "trace_id": trace_id,
+            "from": previous.value if previous else None,
+            "state": current.value,
+            "sequence": sequence,
+        }
+        if checkpoint_id is not None:
+            payload["checkpoint_id"] = checkpoint_id
+        if failure is not None:
+            payload["failure"] = failure
+        self.session_store.append(session_path, "turn.state_changed", payload)
+
 
 def _audit_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     allowed = {
@@ -221,3 +402,7 @@ def _audit_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         "tool_execution_mode",
     }
     return {key: value for key, value in metadata.items() if key in allowed}
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()

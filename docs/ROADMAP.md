@@ -17,7 +17,8 @@ EchoWeave 的主线是可扩展的个人 Agent Runtime。实习经验只用于�
 - [已完成首个切片] 增加 Runtime Host，落实顺序启动、逆序关闭、失败回滚，并接入 Web Gateway；
 - 将 Channel、Provider、Plugin 逐步接入统一生命周期；
 - 将入口层与 Agent Loop 解耦；
-- 为异常、取消、超时和重试建立统一结果模型。
+- [已完成首个切片] 为异常、取消、超时建立 Turn 状态机、结构化 Outcome、失败分类与持久化状态事件；
+- 在 Provider 重试策略接入后补齐统一重试结果模型。
 
 ## M2：插件与能力系统
 
@@ -40,7 +41,7 @@ EchoWeave 的主线是可扩展的个人 Agent Runtime。实习经验只用于�
 
 - 仓库级上下文构建和结构化任务状态；
 - 受控文件修改、Shell、测试和 Git 工具；
-- 高风险审批、Checkpoint、Resume 与失败恢复；
+- [进行中] 高风险审批、Checkpoint、Resume 与失败恢复：已完成起始 checkpoint 和可恢复 Turn 协议，下一步为 Tool Call 幂等账本；
 - 轨迹级 Eval 和可复现软件修复任务集。
 
 ## M5：可靠性与公开证据

@@ -12,7 +12,19 @@ from uuid import uuid4
 import pytest
 from typer.testing import CliRunner
 
-from echoweave_agent_core import AgentCore, AgentCoreConfig, AgentCoreHookBase, CoreTurnContext, SessionRuntimeFacade, TurnRequest, TurnResult
+from echoweave_agent_core import (
+    AgentCore,
+    AgentCoreConfig,
+    AgentCoreHookBase,
+    CoreTurnContext,
+    InvalidTurnTransition,
+    SessionRuntimeFacade,
+    TurnFailureKind,
+    TurnRequest,
+    TurnResult,
+    TurnState,
+    TurnStateMachine,
+)
 from echoweave_coding_agent import CodingAgent, CodingAgentConfig
 from echoweave_harness.audit import configure_audit, read_audit_events
 from echoweave_harness.feedback import suggest_harness_improvements, write_feedback_backlog
@@ -128,3 +140,105 @@ def test_agent_core_hooks_can_shape_turns() -> None:
         assert result.metadata["after_hook"] is True
         assert hook.before_seen == [result.session_id]
         assert hook.after_seen == ["[hooked] hello"]
+
+
+def test_turn_state_machine_rejects_transitions_from_terminal_state() -> None:
+    machine = TurnStateMachine()
+
+    machine.transition(TurnState.RUNNING)
+    machine.transition(TurnState.COMPLETED)
+
+    with pytest.raises(InvalidTurnTransition, match="completed -> running"):
+        machine.transition(TurnState.RUNNING)
+
+
+def test_execute_turn_persists_checkpoint_and_correlated_state() -> None:
+    with _local_tmp() as tmp_path:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        emitted: list[str] = []
+        store = SessionStore(workspace / "echoweave-data" / "sessions")
+        core = AgentCore.from_config(
+            AgentCoreConfig(
+                model_client=SequenceModelClient([AgentResponse(text="durable ok")]),
+                tool_registry=build_registry(workspace),
+                session_store=store,
+                event_sink=emitted.append,
+            )
+        )
+
+        outcome = core.execute_turn(TurnRequest(prompt="durable", resume=False))
+
+        assert outcome.succeeded is True
+        assert outcome.require_result().text == "durable ok"
+        assert outcome.checkpoint is not None
+        events = store.read_events(outcome.session_path)
+        states = [event.payload for event in events if event.type == "turn.state_changed"]
+        assert [state["state"] for state in states] == ["created", "running", "completed"]
+        assert {state["turn_id"] for state in states} == {outcome.turn_id}
+        runtime_events = [json.loads(line) for line in emitted]
+        turn_start = next(event for event in runtime_events if event["type"] == "turn_start")
+        assert turn_start["payload"]["turn_id"] == outcome.turn_id
+        assert turn_start["payload"]["trace_id"] == outcome.trace_id
+
+
+def test_execute_turn_classifies_timeout_and_legacy_api_reraises_original_error() -> None:
+    class TimeoutModel(SequenceModelClient):
+        def generate(self, messages, tools, options=None):
+            raise TimeoutError("provider deadline exceeded")
+
+    with _local_tmp() as tmp_path:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        store = SessionStore(workspace / "echoweave-data" / "sessions")
+        core = AgentCore.from_config(
+            AgentCoreConfig(
+                model_client=TimeoutModel([]),
+                tool_registry=build_registry(workspace),
+                session_store=store,
+            )
+        )
+
+        outcome = core.execute_turn(TurnRequest(prompt="timeout", resume=False))
+
+        assert outcome.state is TurnState.TIMED_OUT
+        assert outcome.failure is not None
+        assert outcome.failure.kind is TurnFailureKind.TIMEOUT
+        assert outcome.failure.retryable is True
+        assert outcome.checkpoint is not None
+        states = [
+            event.payload["state"]
+            for event in store.read_events(outcome.session_path)
+            if event.type == "turn.state_changed"
+        ]
+        assert states == ["created", "running", "timed_out"]
+
+        with pytest.raises(TimeoutError, match="provider deadline exceeded"):
+            core.run_turn(TurnRequest(prompt="legacy timeout", resume=False))
+
+
+def test_execute_turn_stops_before_model_when_checkpoint_creation_fails() -> None:
+    class BrokenCheckpointStore(SessionStore):
+        def create_checkpoint(self, *args, **kwargs):
+            raise OSError("checkpoint disk unavailable")
+
+    with _local_tmp() as tmp_path:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        model = SequenceModelClient([AgentResponse(text="must not run")])
+        store = BrokenCheckpointStore(workspace / "echoweave-data" / "sessions")
+        core = AgentCore.from_config(
+            AgentCoreConfig(
+                model_client=model,
+                tool_registry=build_registry(workspace),
+                session_store=store,
+            )
+        )
+
+        outcome = core.execute_turn(TurnRequest(prompt="checkpoint first", resume=False))
+
+        assert outcome.state is TurnState.FAILED
+        assert outcome.failure is not None
+        assert outcome.failure.kind is TurnFailureKind.CHECKPOINT
+        assert outcome.failure.retryable is True
+        assert model._index == 0

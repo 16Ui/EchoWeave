@@ -30,7 +30,7 @@ EchoWeave 的核心目标：
 EchoWeave
   packages/echoweave_runtime        底层执行基础设施、工具、模型客户端、RAG registry、session store
   packages/echoweave_ai             多平台 AI provider 注册表和适配层
-  packages/echoweave_agent_core     Agent 编排层、TurnRequest/TurnResult、checkpoint/replay
+  packages/echoweave_agent_core     Agent 编排层、Turn Outcome 状态机、checkpoint/replay
   packages/echoweave_coding_agent   本地 AI Coding Agent 应用层、coding CLI/TUI
   packages/echoweave_harness        策略、审计、指标、反馈闭环
   packages/echoweave_social         社交平台 backend、适配器、OneBot/NapCat、配置、社交侧 CLI
@@ -67,7 +67,11 @@ EchoWeave
 - AstrBot 兼容入口：安全分析插件 Manifest、配置、Skills 和 API 使用，未审查代码不会在扫描阶段执行。
 - AstrBot 基础命令桥：通过显式授权的独立 Worker 运行兼容插件，并提供生命周期、请求关联和超时终止。
 - 插件执行策略：敏感能力需声明并授权，Worker 使用隔离模式、环境白名单和有界 JSON 协议。
+- 可恢复 Turn 协议：结构化 Outcome、显式状态机、失败分类、起始 checkpoint 与跨层 trace 关联。
 - Docker Compose：包含 EchoWeave + PostgreSQL + pgvector 的部署形态。
+
+可恢复执行的当前边界和后续幂等设计见
+[docs/RECOVERABLE_AGENT_RUNTIME.md](docs/RECOVERABLE_AGENT_RUNTIME.md)。
 
 ## 快速启动
 
