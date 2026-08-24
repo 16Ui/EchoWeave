@@ -1,19 +1,15 @@
-# Local environment
-.env
-.env.*
-
-# Python cache
 __pycache__/
 *.py[cod]
-
-# Virtual environments
-.venv/
-venv/
-
-# Test/cache
 .pytest_cache/
-
-# Build artifacts
-build/
-dist/
-*.egg-info/
+.test-data/
+pytest-cache-files-*/
+*-test-data/
+.venv/
+.env
+echoweave-state.json
+echoweave-users.json
+config.local.json
+config.docker.json
+logs/
+sandboxes/
+*.log

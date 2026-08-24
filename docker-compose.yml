@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: echoweave
+      POSTGRES_USER: echoweave
+      POSTGRES_PASSWORD: echoweave-password
+    ports:
+      - "5432:5432"
+    volumes:
+      - echoweave_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U echoweave -d echoweave"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  echoweave:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ECHOWEAVE_HOST: 0.0.0.0
+      ECHOWEAVE_PORT: "8787"
+      ECHOWEAVE_RAG_PGVECTOR_DSN: postgresql://echoweave:echoweave-password@postgres:5432/echoweave
+      ECHOWEAVE_RAG_QUERY_REWRITE_ENABLED: ${ECHOWEAVE_RAG_QUERY_REWRITE_ENABLED:-false}
+      ECHOWEAVE_RAG_RERANK_ENABLED: ${ECHOWEAVE_RAG_RERANK_ENABLED:-false}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./config.docker.json:/app/config.local.json:ro
+      - ./sandboxes:/app/sandboxes
+      - ./logs:/app/logs
+
+volumes:
+  echoweave_pgdata:

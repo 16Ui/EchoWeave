@@ -3,13 +3,14 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ui-mono"
+name = "echoweave"
 version = "0.1.0"
-description = "Python coding agent MVP inspired by pi-mono"
+description = "An extensible, model-agnostic personal agent runtime with channel adapters, plugins, tools, and a built-in coding workspace."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "anthropic>=0.52.0",
+  "openai>=1.0.0",
   "python-dotenv>=1.0.1",
   "typer>=0.16.0",
 ]
@@ -18,16 +19,44 @@ dependencies = [
 dev = [
   "pytest>=8.0.0",
 ]
+rag-pgvector = [
+  "psycopg[binary]>=3.2.0",
+  "sentence-transformers>=3.0.0",
+  "pypdf>=5.0.0",
+  "pillow>=10.0.0",
+  "pytesseract>=0.3.10",
+]
 
 [project.scripts]
-ui-mono = "ui_mono.cli:app"
+echoweave = "echoweave_web.cli:app"
+echoweave-social = "echoweave_social.cli:app"
+echoweave-web = "echoweave_web.cli:app"
+echoweave-coding = "echoweave_coding_agent.cli:app"
 
 [tool.setuptools.package-dir]
 "" = "src"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = [
+  "src",
+  "packages/echoweave_runtime/src",
+  "packages/echoweave_ai/src",
+  "packages/echoweave_agent_core/src",
+  "packages/echoweave_coding_agent/src",
+  "packages/echoweave_harness/src",
+  "packages/echoweave_social/src",
+  "packages/echoweave_web/src",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = [
+  "src",
+  "packages/echoweave_runtime/src",
+  "packages/echoweave_ai/src",
+  "packages/echoweave_agent_core/src",
+  "packages/echoweave_coding_agent/src",
+  "packages/echoweave_harness/src",
+  "packages/echoweave_social/src",
+  "packages/echoweave_web/src",
+]

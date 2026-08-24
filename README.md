@@ -1,414 +1,504 @@
-# ui-mono
+# EchoWeave
 
-Python 原生实现的 coding agent CLI MVP，参考 pi-mono 的核心链路与设计取舍：最小工具集、显式运行时、可恢复会话、上下文压缩，以及能被验证的端到端演示路径。
+EchoWeave 是一个自研、模型无关、可扩展的个人 AI Agent Runtime。它把消息渠道、
+模型 Provider、Agent Loop、工具、知识检索、权限与可观测性组织在统一运行时中；
+Coding Agent 是其中技术深度最高的内置能力，但不是项目的全部定位。
+
+项目吸收早期个人 Coding Agent 的运行时积累，并参考成熟机器人框架的多平台适配与
+插件化思路。目标不是复制现有机器人，也不是堆叠聊天界面，而是建立一个能够解释、
+验证并持续演进的个人 Agent 底座。
+
+默认文档语言为中文；英文说明作为备选放在文档末尾或独立英文摘要中。
+
+## 项目定位
+
+EchoWeave 的核心目标：
+
+- 把每个社交会话路由到独立的 Agent 会话和沙盒环境。
+- 通过统一事件协议解耦 Web、CLI、QQ、飞书和微信等消息入口。
+- 通过显式生命周期和能力声明承载插件、Skill 与工具扩展。
+- 支持多模型接入，包含 OpenAI、DeepSeek、Anthropic、Ollama 和 OpenAI-compatible 服务。
+- 支持可选 RAG，默认方案为 pgvector + BGE-M3 + 混合检索。
+- 支持全局 skill 和会话 skill 的勾选式启用。
+- 支持审批、审计、策略 DSL、指标报表和 harness 反馈闭环。
+- 将 Coding Workspace 作为内置 Agent 能力，而不是把整个项目限制成 Coding Agent。
+- 支持作为个人助手、技术作品和长期运行的本地服务继续演进。
+
+## 项目结构
+
+```text
+EchoWeave
+  packages/echoweave_runtime        底层执行基础设施、工具、模型客户端、RAG registry、session store
+  packages/echoweave_ai             多平台 AI provider 注册表和适配层
+  packages/echoweave_agent_core     Agent 编排层、TurnRequest/TurnResult、checkpoint/replay
+  packages/echoweave_coding_agent   本地 AI Coding Agent 应用层、coding CLI/TUI
+  packages/echoweave_harness        策略、审计、指标、反馈闭环
+  packages/echoweave_social         社交平台 backend、适配器、OneBot/NapCat、配置、社交侧 CLI
+  packages/echoweave_web            Web 服务、Webhook server、管理面板、命令中心、SSE、顶层 CLI
+  src/echoweave                     项目主 facade 命名空间
+  docs                           部署和运维文档
+  scripts                        启动、健康检查、RAG 初始化、harness 报表脚本
+```
+
+消息链路：
+
+```text
+社交平台 Webhook
+  -> 平台适配器，例如 generic / AstrBot / OneBot v11 / Feishu / WeChat
+  -> EchoWeaveEvent
+  -> EchoWeaveBackend
+  -> 内嵌 EchoWeave Agent Runtime
+  -> EchoWeaveReply
+  -> 平台响应或主动发送
+```
 
 ## 当前能力
 
-- Anthropic provider 适配，模型调用与工具 schema 解耦。
-- `AgentSessionRuntime` 负责 turn 编排、tool calling、summary / compaction、session 写入。
-- **runtime JSON stream** 与 **session event log** 已明确区分：
-  - runtime JSON stream：面向运行期观察，统一使用 `event / timestamp / session_id / payload`
-  - session event log：面向持久化恢复，使用 JSONL 保存 `session` / `message` / `tool_call` / `tool_result` / `tool_error` / `branch` / `compaction`
-- session snapshot 恢复、branch/fork、session tree 构建。
-- 本地工具集：`read` / `write` / `edit` / `bash` / `ls` / `find` / `grep`。
-- 工作目录边界保护与 surrogate 字符清洗。
-- 集中式 shell 命令安全策略（`ShellCommandPolicy`）：三级裁决（`ALLOW / REQUIRE_APPROVAL / DENY`），高危命令直接拒绝，中风险命令在 `chat` 交互模式下触发 `typer.confirm()`，headless 模式（`run / rpc / code-demo / demo`）自动拒绝。
-- 脚本化 demo 模型（`demo` / `code-demo`）与真实 Anthropic 模型（`chat` / `run` / `rpc`）并存，前者不消耗 API 额度。
+- Generic Webhook：用于本地 smoke test 或自定义平台接入。
+- AstrBot-shaped adapter：兼容 AstrBot 风格事件字段。
+- OneBot v11 adapter：适配 QQ/NapCat/Lagrange 等 OneBot v11 HTTP 事件。
+- OneBot HTTP client：可主动调用 `send_private_msg` / `send_group_msg`。
+- Feishu/Lark adapter：支持飞书事件回调和 `im.message.receive_v1`。
+- WeChat Official Account adapter：支持微信公众号明文 XML 回调和 `echostr` 校验。
+- Web 管理面板：配置模型、RAG、skill、管理员、沙盒、审批、harness policy。
+- SSE：提供运行事件流，便于仪表盘或调试客户端订阅。
+- Docker Compose：包含 EchoWeave + PostgreSQL + pgvector 的部署形态。
 
-## 架构概览
+## 快速启动
 
-```text
-CLI commands
-  ├─ chat                  真实模型对话入口 + 内置内省命令（需 ANTHROPIC_API_KEY）
-  ├─ run                   headless 一次性执行（需 ANTHROPIC_API_KEY）
-  ├─ rpc                   JSONL 长连接模式（需 ANTHROPIC_API_KEY）
-  ├─ demo                  脚本化 runtime 演示（无需 API key）
-  ├─ code-demo             脚本化编程闭环演示（无需 API key）
-  ├─ inspect-session       验证 resume / branch / compaction
-  ├─ sessions-list         浏览 session 列表
-  ├─ sessions-summary      查看最新摘要
-  └─ sessions-tree         浏览 session 树
+从 `D:\games\EchoWeave` 运行：
 
-AgentSessionRuntime
-  ├─ build_branch_messages()
-  ├─ model_client.generate()
-  ├─ tool execution + tool_error recovery
-  ├─ unified runtime stream events
-  └─ compaction summary + kept history replay
-
-SessionStore (JSONL)
-  ├─ create / append / read_events
-  ├─ load_snapshot / load_history
-  ├─ list_paths / latest
-  ├─ fork
-  └─ build_tree
+```powershell
+$env:PYTHONPATH="D:\games\EchoWeave\src;D:\games\EchoWeave\packages\echoweave_runtime\src;D:\games\EchoWeave\packages\echoweave_ai\src;D:\games\EchoWeave\packages\echoweave_agent_core\src;D:\games\EchoWeave\packages\echoweave_coding_agent\src;D:\games\EchoWeave\packages\echoweave_harness\src;D:\games\EchoWeave\packages\echoweave_social\src;D:\games\EchoWeave\packages\echoweave_web\src"
+python -m echoweave.cli once --cwd D:\games\EchoWeave --text "hello from EchoWeave" --json
 ```
 
-对应代码入口：
+本地 coding-agent 的原 runtime CLI 已迁移到 `echoweave_coding_agent.cli`，console script
+为 `echoweave-coding`。
 
-- 运行时：[src/ui_mono/runtime/agent_session.py](src/ui_mono/runtime/agent_session.py)
-- 会话存储：[src/ui_mono/session/store.py](src/ui_mono/session/store.py)
-- CLI：[src/ui_mono/cli.py](src/ui_mono/cli.py)
-- 工具注册：[src/ui_mono/app.py](src/ui_mono/app.py)
+## NapCat / OneBot v11 部署
 
-## 安装
+1. 复制配置文件：
 
-```bash
-pip install -e .[dev]
+```powershell
+Copy-Item D:\games\EchoWeave\config.example.json D:\games\EchoWeave\config.local.json
 ```
 
-## 配置真实模型对话
-
-`chat` 命令会按以下顺序加载凭据：
-
-1. 当前工作目录 `.env`
-2. 进程环境变量
-3. `~/.claude/config.json` 中的 `env`
-
-至少需要其一：
-
-- `ANTHROPIC_API_KEY`
-- `ANTHROPIC_AUTH_TOKEN`
-
-## 1. 稳定端到端演示
-
-这是目前最适合放到简历或答辩里的稳定 demo，**不依赖外部模型服务，也不消耗 API 额度**。
-
-> **说明：`demo` 和 `code-demo` 命令使用脚本化模型（`SequenceModelClient` / `build_code_demo_model`），其"模型响应"是预先硬编码的固定脚本，不经过任何真实 LLM。** 它们的目的是稳定复现整条 runtime 链路（工具调用、事件流、tool_error 恢复、runtime JSON stream），而不是展示模型智能。如需验证真实 Anthropic 模型连通性，请参考 [第 3 节](#3-真实聊天入口)。
-
-### 1.1 通用 runtime 演示
-
-```bash
-ui-mono demo --cwd .
-ui-mono demo --cwd . --json
-ui-mono demo --cwd . --json-stream
-```
-
-现在 `--json-stream` 已经是**真实流式输出**：assistant 的 `message_update.delta` 会分多次发出，而且 `message_update` 本身只携带增量片段；完整文本会在 `message_end.content` 和 `turn_end.turn.reply` 中给出。对于仅触发 tool call、没有任何可见文本的中间回合，runtime stream 不会再额外发出空白 assistant `message_start / message_update / message_end` 事件。
-
-这个命令会按固定脚本完成：
-
-1. `write demo-notes.txt`
-2. `read demo-notes.txt`
-3. `edit demo-notes.txt`
-4. `grep demo-notes.txt`
-5. 故意读取不存在的 `missing.txt`
-
-你会在输出里看到：
-
-- 正常的 `tool_call` / `tool_result`
-- 明确的 `tool_error`
-- `--json-stream` 下的逐事件 runtime stream（如 `turn_start`、`message_start`、`message_update`、`tool_execution_start`、`tool_execution_end`、`turn_end`），并使用更标准的 payload 结构：
-  - `turn_start` / `turn_end` → `payload.turn`
-  - `message_update` → `payload.message.delta`（只发增量，不重复携带全文）
-  - `message_end` → `payload.message.content`（给出该条消息的完整内容）
-  - `tool_execution_*` → `payload.tool` + `payload.result`
-
-### 1.2 编程任务闭环演示
-
-```bash
-ui-mono code-demo --cwd .
-ui-mono code-demo --cwd . --json
-ui-mono code-demo --cwd . --json-stream
-```
-
-这个命令会在 `.ui-mono-code-demo/` 下构造一个最小 Python 修 bug 场景，并复用同一套 runtime 跑完整 coding loop：
-
-1. `read calculator.py`
-2. `read test_calculator.py`
-3. `bash` 运行 pytest，先观察失败
-4. `edit calculator.py` 修复 bug
-5. `bash` 再次运行 pytest，确认通过
-
-输出里会包含：
-
-- 两次 `bash` 测试执行结果（先失败、后通过）
-- 被修复的源码文件路径
-- 最终 assistant reply
-- 完整 runtime 事件流（`--json-stream`）
-
-这条演示更适合拿来说明：`ui-mono` 已经不只是“会调工具”，而是能稳定展示最小 `read → edit → test → fix → retest` 编程闭环。
-
-### 1.3 shell 安全边界
-
-当前文件工具和 shell 工具都受边界控制：
-
-- `read` / `write` / `edit` 继续受工作目录边界保护，禁止路径逃逸
-- `bash` 在执行前会经过集中式 shell policy
-- 明显危险的命令（如 `rm -rf`、`shutdown`、破坏性 git reset/clean 等）会被直接拒绝
-- 被拒绝的 shell 调用会进入 `tool_error` 和 runtime stream，便于调试与审计
-
-这让 `ui-mono` 的 coding demo 不只是“能跑起来”，而是已经具备最小 guardrails。
-
-一个最小示例大概长这样：
-
-```jsonl
-{"event":"turn_start","timestamp":"2026-04-12T10:00:00.000Z","session_id":"sess_123","payload":{"turn":{"input":"read README"}}}
-{"event":"message_start","timestamp":"2026-04-12T10:00:00.010Z","session_id":"sess_123","payload":{"message":{"role":"assistant","kind":"response"}}}
-{"event":"message_update","timestamp":"2026-04-12T10:00:00.020Z","session_id":"sess_123","payload":{"message":{"role":"assistant","delta":"I can"}}}
-{"event":"message_update","timestamp":"2026-04-12T10:00:00.030Z","session_id":"sess_123","payload":{"message":{"role":"assistant","delta":" help"}}}
-{"event":"message_update","timestamp":"2026-04-12T10:00:00.040Z","session_id":"sess_123","payload":{"message":{"role":"assistant","delta":" with that."}}}
-{"event":"message_end","timestamp":"2026-04-12T10:00:00.050Z","session_id":"sess_123","payload":{"message":{"role":"assistant","kind":"response","content":"I can help with that."}}}
-{"event":"turn_end","timestamp":"2026-04-12T10:00:00.060Z","session_id":"sess_123","payload":{"turn":{"reply":"I can help with that.","summary":null}}}
-```
-
-这里要注意：连续多个 `message_update` 是正常的，因为模型流式输出本来就会把一句话拆成多个增量片段；真正的完整文本要看 `message_end.content` 或 `turn_end.turn.reply`。如果某一轮只有 `tool_use`、没有用户可见文本，那么这轮不会输出空白 assistant 消息事件。
-
-演示重点是：`ui-mono` 不只是“能调工具”，而是已经具备**成功路径 + 失败路径**的事件记录能力。
-
-## 2. 验证 resume / branch / compaction
-
-```bash
-ui-mono inspect-session --cwd .
-ui-mono inspect-session --cwd . --json
-ui-mono inspect-session --cwd . --json-stream
-```
-
-这个命令会自动：
-
-1. 创建 base session
-2. 连续运行多轮触发 compaction
-3. fork 出 `experiment` 分支
-4. 在分支上继续一轮对话
-5. 重新从 session store 读取 snapshot
-6. 输出 session tree、summary 和恢复后的 history 大小
-
-重点看这几行：
-
-- `compaction seen: True`
-- `branch event seen: True`
-- `branch summary: ...`
-- `session tree:`
-
-它对应 pi-mono 里“会话不是线性日志，而是可恢复、可分叉的历史树”这一核心思想。
-
-## 3. 真实聊天入口
-
-> **`chat` / `run` / `rpc` 命令调用真实 Anthropic 模型，需要设置 API key。** 与 `demo` / `code-demo` 不同，这里的响应由实际 LLM 生成。
-
-### 3.0 设置凭据并验证连通性
-
-```bash
-# 1. 设置 API key（任选其一）
-export ANTHROPIC_API_KEY=sk-ant-...          # 直接写入环境变量
-# 或在当前目录创建 .env 文件：
-echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
-
-# 2. 验证真实模型连通性（最小 smoke test）
-ui-mono run --cwd . --prompt "Say hello in one sentence"
-ui-mono run --cwd . --prompt "Say hello in one sentence" --json
-ui-mono run --cwd . --prompt "Say hello in one sentence" --json-stream
-```
-
-如果输出包含模型回复，说明凭据和网络均正常。
-
-> Windows 控制台提示：CLI 输出已统一按 UTF-8 写入，`run/chat/rpc` 在包含中文或 emoji（如 👋）时不会再因默认 GBK 编码抛出 `UnicodeEncodeError`。
-
-```bash
-ui-mono chat --cwd .
-ui-mono chat --cwd . --resume
-ui-mono chat --cwd . --model claude-opus-4-6
-ui-mono chat --cwd . --json-stream
-```
-
-## 3.1 headless 一次性执行
-
-```bash
-ui-mono run --cwd . --prompt "read README"
-ui-mono run --cwd . --prompt "read README" --json
-ui-mono run --cwd . --prompt "read README" --json-stream
-```
-
-这个模式适合脚本、CI 或一次性调用：执行一轮 prompt，输出结果后退出。
-
-交互内支持：
-
-- `/branch <label>`：从当前 session fork 一个新分支
-- `/summary`：以 runtime inspect event 输出当前 session 的最新摘要
-- `/inspect`：以 runtime inspect event 输出当前 session 的 header / summary / compaction 状态
-- `/tree`：以 runtime event 输出当前所有 session 的树结构
-- `/sessions`：以 runtime event 输出当前可浏览的 session 列表
-- `/quit`：退出
-
-其中 `--json-stream` 下的 chat 内省输出也统一走 runtime schema：
-
-- `inspect_summary` → `payload.inspect`
-- `inspect_session` → `payload.inspect`
-- `session_tree` → `payload.tree`
-- `session_list` → `payload.sessions`
-- `branch_created` → `payload.branch`
-
-## 4. session 浏览命令
-
-```bash
-ui-mono sessions-list --json
-ui-mono sessions-summary --json
-ui-mono sessions-tree --json
-
-ui-mono sessions-list --json-stream
-ui-mono sessions-summary --json-stream
-ui-mono sessions-tree --json-stream
-
-ui-mono sessions-list --cwd . --demo --json
-ui-mono sessions-summary --cwd . --demo --json
-ui-mono sessions-tree --cwd . --demo --json
-ui-mono sessions-list --cwd . --demo --json-stream
-```
-
-这些命令补的是更接近 pi-mono 的“可浏览 session 状态”，而不是只有 `--resume` 一条路径。
-
-- `--json`：输出命令结束后的结构化汇总对象
-- `--json-stream`：输出单条 runtime-style 观察事件
-
-## 4.1 RPC / JSONL 模式
-
-```bash
-ui-mono rpc --cwd .
-```
-
-启动后从 stdin 逐行读取 JSON 命令，并向 stdout 写出 JSONL：
-
-- runtime stream event
-- `rpc_response`
-- `rpc_error`
-
-其中 runtime stream 与 `run --json-stream` 保持一致：
-
-- `message_update` 只输出增量 `delta`
-- `message_end` 输出完整消息 `content`
-- `turn_end` 输出最终回复 `payload.turn.reply`
-- 纯 `tool_use` 中间回合不会输出空白 assistant 消息事件
-
-示例输出片段：
-
-```jsonl
-{"event":"message_update","timestamp":"2026-04-12T10:00:00.020Z","session_id":"sess_123","payload":{"message":{"role":"assistant","delta":"read"}}}
-{"event":"message_update","timestamp":"2026-04-12T10:00:00.030Z","session_id":"sess_123","payload":{"message":{"role":"assistant","delta":" README"}}}
-{"event":"message_end","timestamp":"2026-04-12T10:00:00.040Z","session_id":"sess_123","payload":{"message":{"role":"assistant","kind":"response","content":"read README"}}}
-{"event":"rpc_response","timestamp":"2026-04-12T10:00:00.050Z","session_id":"sess_123","payload":{"request_id":"1","command":"prompt","result":{"reply":"read README"}}}
-```
-
-示例输入：
+2. 修改 `config.local.json`：
 
 ```json
-{"id":"1","type":"prompt","prompt":"read README"}
-{"id":"2","type":"summary"}
+{
+  "adapter": "onebot-v11",
+  "host": "127.0.0.1",
+  "port": 8787,
+  "webhook_token": "换成一个足够长的随机 token",
+  "web_allow_url_token": false,
+  "web_session_ttl_seconds": 28800,
+  "default_model_profile": "deepseek-chat"
+}
 ```
 
-## 5. 测试
+3. 启动 EchoWeave：
 
-```bash
-pytest --rootdir="D:/develop/agent/ui-mono" "D:/develop/agent/ui-mono/tests"
+```powershell
+D:\games\EchoWeave\scripts\start-echoweave.ps1
 ```
 
-当前测试覆盖：
+4. 在 NapCat 的 HTTP Client 中填写：
 
-- 工具读写与路径越界保护
-- surrogate 输入清洗
-- tool_error 事件记录与回填
-- session snapshot 恢复
-- branch relationship
-- demo 命令输出
-- demo / inspect-session 的 JSON 与 JSON stream 输出
-- session 浏览命令的 JSON / JSON stream 输出
-- inspect/session/tree 类 payload 结构对齐
+```text
+http://127.0.0.1:8787/
+```
 
-## 设计取舍
+如果你同时启用了 NapCat HTTP Server，可以把 `onebot_api_url` 配成例如
+`http://127.0.0.1:3000`，这样 EchoWeave 会主动调用 OneBot API 发送消息。只用
+HTTP Client 也可以工作，EchoWeave 会通过 HTTP 响应返回 OneBot quick operation。
+如果平台支持自定义请求头，推荐使用 `Authorization: Bearer <webhook_token>`。URL
+query token 默认关闭，只保留给开发兼容场景，可通过 `web_allow_url_token: true` 临时打开。
 
-参考 pi-mono，但当前仍保持单包 Python MVP，不照搬 monorepo：
+## 模型配置
 
-- **照搬的思想**
-  - runtime 独立于 provider
-  - 会话事件流而不是单纯 history list
-  - branch / resume / compaction 是一等能力
-  - 失败路径也要可观察
-  - inspect 和 JSON 输出优先面向“可验证”，而不是先做复杂 UI
+模型通过 `model_profiles` 管理。建议把 profile 名写成“平台 + 模型 + 用途”，
+不要只写 `default`、`openai` 这类容易混淆的名字。内置 provider 可直接写入
+profile：
 
-- **暂不照搬的部分**
-  - 多包 monorepo
-  - TUI / Web UI
-  - RPC / JSON streaming 模式的完整协议层
-  - 扩展系统与复杂 settings 层
+```json
+"model_profiles": {
+  "demo-echo": {
+    "provider": "demo",
+    "model": null,
+    "label": "Demo / 本地 Echo",
+    "description": "不调用外部模型，用于确认链路是否打通。"
+  },
+  "deepseek-chat": {
+    "provider": "deepseek",
+    "model": "deepseek-chat",
+    "label": "DeepSeek Chat",
+    "description": "需要 DEEPSEEK_API_KEY。"
+  },
+  "openai-gpt-4.1-mini": {
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "label": "OpenAI GPT-4.1 mini",
+    "description": "需要 OPENAI_API_KEY。"
+  },
+  "anthropic-sonnet": {
+    "provider": "anthropic",
+    "model": "claude-3-5-sonnet-latest",
+    "label": "Anthropic Claude Sonnet",
+    "description": "需要 ANTHROPIC_API_KEY。"
+  },
+  "ollama-qwen-coder": {
+    "provider": "ollama",
+    "model": "qwen2.5-coder:7b",
+    "label": "Ollama 本地 Qwen Coder"
+  },
+  "custom-openai-compatible": {
+    "provider": "openai-compatible",
+    "model": "your-model",
+    "base_url": "https://example.com/v1",
+    "api_key_env": "YOUR_API_KEY",
+    "label": "自定义 OpenAI-compatible"
+  }
+}
+```
 
-这样做的目标不是功能堆叠，而是先把最关键的运行时抽象和验证闭环补扎实。
+设置对应环境变量，例如 `DEEPSEEK_API_KEY`、`OPENAI_API_KEY`、
+`ANTHROPIC_API_KEY` 或自定义 `api_key_env`。管理端和用户端会在模型下拉框里
+显示 profile 的 label、provider/model 以及 API key 是否已配置；如果缺少 key，
+真实 LLM 会返回中文错误提示，不再直接暴露 OpenAI SDK 的低层报错。
+本地 coding CLI 的模型工厂也支持 `anthropic`、`openai`、`openai-compatible`、
+`deepseek`、`openrouter`、`siliconflow`、`ollama`。
 
-## 为什么这样设计
+管理端也可以通过 `AI providers JSON` 注册声明式 OpenAI-compatible 平台，再在
+`Model profiles JSON` 中选择它：
 
-这部分是最适合在简历或面试里复述的设计动机。
+```json
+"ai_providers": {
+  "local-lmstudio": {
+    "type": "openai-compatible",
+    "base_url": "http://127.0.0.1:1234/v1",
+    "api_key_env": "LOCAL_LLM_API_KEY",
+    "default_model": "qwen2.5-coder:7b"
+  }
+},
+"model_profiles": {
+  "local-lmstudio-qwen": {
+    "provider": "local-lmstudio",
+    "model": "qwen2.5-coder:7b",
+    "label": "LM Studio 本地 Qwen"
+  }
+}
+```
 
-### 1. 为什么要把 runtime 单独抽出来
+这类网页端注册适合 DeepSeek 兼容网关、OpenRouter、SiliconFlow、本地 Ollama、
+LM Studio、vLLM 或公司内部 OpenAI-compatible 服务。更复杂的自定义 provider 可以在
+Python 代码中通过 `echoweave_ai.register_ai_provider()` 注册，注册后同样在
+`model_profiles` 中直接选择。
 
-如果把模型调用、工具执行、session 写入、摘要压缩都揉在 CLI 或一个简单 while loop 里，代码虽然能跑，但后续很难验证每一轮到底发生了什么。
+聊天中可使用：
 
-把 `AgentSessionRuntime` 单独抽出来后，一次 turn 的职责变得明确：
+```text
+/models
+/model <profile>
+```
 
-- 组装上下文
-- 调用模型
-- 执行工具
-- 记录事件
-- 触发 compaction
-- 返回可恢复状态
+## 沙盒与权限
 
-这样做的价值是：**把“能聊天”提升成“能被验证、能恢复、能演进的运行时”**。
+默认情况下，每个私聊或群聊会话都有独立沙盒。普通会话不会直接扫描
+`D:\develop\agent` 或其他真实项目目录。
 
-### 2. 为什么 session 要存成事件流，而不是只存 history
+常用命令：
 
-只存最终 history 虽然简单，但会丢掉很多关键过程：
+```text
+/status
+/bind <workspace>
+/unbind
+```
 
-- 哪一步触发了工具调用
-- 哪次工具失败了
-- 什么时候发生了 compaction
-- 当前 branch 是从哪里分出来的
+`/bind` 只应在你明确希望某个会话操作真实仓库时使用；`/unbind` 会回到该会话的
+独立沙盒。
 
-所以 `ui-mono` 采用 JSONL 事件流，把 `tool_call`、`tool_result`、`tool_error`、`branch`、`compaction` 都保留下来。
+访问控制配置：
 
-这样做的价值是：**session 不再只是聊天记录，而是可重放、可检查、可分叉的运行轨迹**。
+```json
+"admins": ["your_user_id"],
+"allowed_users": [],
+"allowed_groups": [],
+"blocked_users": [],
+"require_mention_in_group": false,
+"bot_ids": [],
+"admin_only_commands": ["approve", "approvals", "bind", "deny", "rag:index", "retry", "revoke", "skill:global"],
+"approval_timeout_seconds": 3600
+```
 
-### 3. 为什么 compaction 要做成显式事件
+空白 allowlist 表示开发期友好默认：允许任何发送者使用。配置 `allowed_users` 或
+`allowed_groups` 后，仅允许列表中的用户/群使用。`blocked_users` 总是优先生效。
 
-上下文窗口有限，长对话不可能永远把全部历史原样塞给模型。简单截断虽然省事，但模型会失去之前的重要上下文。
+## 审批流程
 
-因此这里没有只做“裁掉前面消息”，而是把 compaction 做成显式事件：
+当命令需要审批时，EchoWeave 会保存 pending approval 并返回审批 id。管理员可以通过
+聊天或 Web 面板处理：
 
-- 保留尾部 history
-- 为被压缩部分生成 summary
-- 在恢复时重新注入 summary 与剩余上下文
+```text
+/approvals
+/approve <id>
+/deny <id>
+/revoke <id>
+/retry <id>
+```
 
-这样做的价值是：**把“丢上下文”变成“有边界、有记录的上下文压缩”**。
+Web 用户端：
 
-### 4. 为什么先做 inspect / JSON 输出，而不是先做界面
+```text
+http://127.0.0.1:8787/
+```
 
-参考 pi-mono 的思路，真正重要的不是先做一个漂亮前端，而是先保证 runtime 的行为可观察。
+Web 管理端：
 
-所以当前优先补的是：
+```text
+http://127.0.0.1:8787/admin
+```
 
-- `inspect-session`：验证 resume / branch / compaction
-- `--json` 输出：把运行结果变成结构化汇总对象，并逐步贴近 runtime payload 结构
-- `--json-stream` 输出：逐条输出统一 runtime 事件 schema（`event` / `timestamp` / `session_id` / `payload`）
-- `sessions-list` / `sessions-summary` / `sessions-tree`：把 session 浏览能力补齐
-- runtime observer / dispatcher：把运行时事件发送与 CLI 输出解耦
-- provider 真流式输出：让 `message_update.delta` 变成真实增量，并把完整文本放到 `message_end.content`，避免每次 update 都重复整段内容
+`echoweave_web` 现在分为用户端和管理端：
 
-这样做的价值是：**先把系统做成可调试、可验证、可解释，再考虑更重的交互层**。
+- 用户端是独立于社交平台的 AI Coding 工作台，类似早期 `ui-mono` 的 Web 入口。
+- 管理端负责项目级配置、审批处理、模型/RAG/harness/skill/管理员配置。
+- 浏览器访问用户端/管理端会先进入登录页，登录成功后使用 HttpOnly Cookie 中的 JWT。
+- 第一次进入登录页时使用“注册/初始化”创建首个账号；首个账号默认为 admin，用户数据持久化到 `echoweave-users.json`。
+- `webhook_token` 只用于 webhook 的服务端校验，也保留“Webhook 访问密码登录”的开发兼容入口，不再展示在页面 URL 中。
 
-### 6. 为什么要区分 chat / run / rpc
+用户端内置常用命令按钮。用户不需要记住大部分 slash command，可以直接在网页中操作：
 
-三者不是三套不同 agent，而是同一个 runtime 的三个入口：
+- 查看 `/status`、`/models`、`/skills`、`/rag`、`/approvals`。
+- 切换模型 profile。
+- 开启/关闭 RAG，索引当前工作区。
+- 启用/关闭会话 skill 或全局 skill。
+- 绑定真实工作区或解绑回独立沙盒。
+- 发送自定义命令或普通消息到指定会话。
+- 查看实时 SSE 事件流，包括消息、回复、错误和 heartbeat。
 
-- `chat`：给人类交互使用
-- `run`：给脚本 / CI 的一次性 headless 模式
-- `rpc`：给程序集成的长连接 JSONL 模式
+用户端发送的请求会走同一套 Agent runtime、沙盒、权限、审批、RAG、skill 和模型逻辑，
+不会绕过后端直接执行命令。
 
-这样做的价值是：**同一套 session、stream、observer、tool calling 逻辑，可以同时服务人类交互和程序调用。**
+要让某个会话实际访问当前主机上的真实文件夹：
 
-这两个东西看起来都像“事件”，但职责不同。
+1. 进入管理端，把 `web-admin` 加入“管理员”，然后保存配置。
+2. 回到用户端，保持“用户 ID”为 `web-admin`。
+3. 在“工作区 -> 本地路径”填写真实目录，例如 `D:\games\EchoWeave`。
+4. 点击“绑定路径”。之后该会话的文件访问和命令工作目录会指向这个真实目录。
+5. 点击“回到沙盒”或发送 `/unbind` 可恢复到每个会话独立沙盒。
 
-- **runtime JSON stream**：服务运行期观察，强调前端、RPC、TUI、脚本集成时“当前发生了什么”
-- **session event log**：服务持久化恢复，强调之后还能不能把 session 正确读回来、继续跑下去
+真实工作区绑定仍会经过权限、审批、harness policy 和路径策略检查；不想让网页端绑定真实目录时，不要把 `web-admin` 加入管理员。
 
-所以现在 `ui-mono` 把它们分开：
+## Skill
 
-- runtime stream 统一为 `event / timestamp / session_id / payload`
-- session log 继续使用针对恢复友好的 JSONL 事件模型
+Skill 采用列表勾选式启用模型，分为全局 skill 和会话 skill。
 
-这样做的价值是：**把“运行时可观察性”和“状态持久化”拆成两套边界清晰的机制，后续接 RPC / TUI / Web UI 时不会和 session 恢复语义混在一起。**
+```text
+/skills
+/skill on <name>
+/skill off <name>
+/skill global on <name>
+/skill global off <name>
+```
+
+`/skills` 会显示 `[x]` / `[ ]` 状态，并用 `G` 表示全局启用、`S` 表示会话级启用。
+
+## RAG
+
+RAG 默认关闭，可按会话开启：
+
+```text
+/rag
+/rag on
+/rag off
+/rag index
+```
+
+默认 RAG 后端为 `pgvector_hybrid_bgem3`：
+
+- 向量模型：BGE-M3，默认 `BAAI/bge-m3`。
+- 数据库：PostgreSQL + `pgvector`。
+- 检索：余弦距离向量检索 + BM25 混合搜索。
+- Query rewrite：可选插槽，默认 `local_multi_query`。
+- Rerank：可选插槽，默认 BM25 reranker。
+- Provider registry：可通过 `register_retrieval_provider()` 注册新的 RAG provider。
+- Markdown：优先按标题层级切 chunk。
+- PDF：文字提取后固定窗口 + overlap。
+- 图片：OCR 后固定窗口 + overlap。
+
+初始化数据库：
+
+```powershell
+D:\games\EchoWeave\scripts\init-rag-db.ps1
+```
+
+可选 query rewrite / rerank 配置：
+
+```json
+"rag_query_rewrite_enabled": true,
+"rag_query_rewrite_strategy": "local_multi_query",
+"rag_query_rewrite_max_queries": 3,
+"rag_rerank_enabled": true,
+"rag_rerank_strategy": "bm25",
+"rag_rerank_candidate_multiplier": 4,
+"rag_rerank_original_score_weight": 0.65,
+"rag_rerank_bm25_weight": 0.35
+```
+
+## Harness
+
+`echoweave_harness` 是 EchoWeave 的约束和反馈层，负责：
+
+- 结构化 audit log。
+- 命令、工具、路径、模型、skill、RAG 的策略 DSL。
+- 回答质量、工具调用正确率、审批命中率、审批处理率、RAG 命中率、沙盒逃逸拦截率、
+  策略拦截率、模型调用成功率等指标。
+- 把失败和低质量指标转成可审查的 hardening backlog。
+
+配置示例：
+
+```json
+"harness_audit_enabled": true,
+"harness_audit_path": "D:/games/EchoWeave/logs/audit.jsonl",
+"harness_policy": {
+  "allowed_tools": [],
+  "denied_tools": [],
+  "allowed_paths": [],
+  "denied_paths": [],
+  "command_allow_patterns": [],
+  "command_approval_patterns": [],
+  "command_deny_patterns": [],
+  "session_model_allowlist": [],
+  "session_skill_allowlist": [],
+  "session_rag_enabled": null
+}
+```
+
+生成 harness 报表：
+
+```powershell
+D:\games\EchoWeave\scripts\harness-report.ps1
+```
+
+默认会读取 `logs/audit.jsonl`，输出指标，并把建议追加到
+`logs/harness-feedback.jsonl`。
+backlog 记录包含 `metric`、`evidence` 和 `action` 字段，便于后续自动生成测试、
+策略或文档补丁。
+
+### Coding Agent Harness 增强
+
+EchoWeave runtime 已内置一组参考成熟 coding agent 的执行约束：
+
+- `edit` 采用唯一搜索替换：`old`/`old_string` 必须在文件中恰好出现一次，成功后返回
+  unified diff，避免行号漂移和整文件误写。
+- `write` 面向整文件写入：覆盖已有文件时返回 diff，可通过 `overwrite=false` 拒绝覆盖。
+- `read` 支持 `start_line`/`end_line` 和 `max_chars`，大文件会保留头尾并标记截断，
+  避免一次工具结果冲爆上下文。
+- `bash` 会拦截交互式命令，记录命令分类、超时和输出截断信息，并支持 `cd` 工作目录跟踪；
+  后续命令会在更新后的工作目录中执行，但仍不能逃出 workspace。
+- `agent` 支持 `explore`、`plan`、`verify`、`summarize` 只读角色，用于隔离式扫描工作区并返回
+  紧凑报告；传入 `use_model=true` 时会用独立消息上下文调用一次模型生成子 Agent 摘要。
+- `agent` 的 `worker` 角色会把指定 scope 复制到临时工作区，在副本里执行唯一文本替换并返回
+  unified diff，默认不修改真实 workspace，适合先试修、再由主 Agent/用户确认应用。
+- `workers` 提供多 Worker 编排入口：可先 `plan` 多个子任务的读写集合并报告冲突，再 `run`
+  只读/写入型隔离 Worker；写同一文件的 Worker 会标记 `requires_serial=true`，避免并行合并时互相覆盖。
+- `patch` 提供 worker patch 闭环：`stage` 保存补丁、`show/list` 预览、`apply` 必须传入
+  `confirm=true` 才会写入真实 workspace，应用时保存回滚备份，`rollback` 可恢复应用前内容。
+- `tool_search` 可按名称或说明搜索当前已注册工具，便于在 Skill/MCP 扩展较多时做能力发现。
+- `todo` 提供显式任务清单，支持 `list`、`set`、`clear`，并限制同一时间只有一个
+  `in_progress` 项，帮助长任务在 checkpoint/replay 前后保持进度可读。
+- RAG 和 memory 注入会标记为不可信参考资料；疑似 prompt injection 的片段会被标注，
+  不能覆盖 system prompt 或工具安全策略。
+- 历史消息进入模型前会对大段 `tool_result` 做 head/tail 裁剪；再结合已有 summary/compaction
+  机制，减少长会话里重复工具输出挤占上下文的问题。
+- `tool_execution_mode=streaming` 时，runtime 会在模型流中收到完整的安全只读 `tool_call_end`
+  后立即执行该工具，并在 assistant tool_use 消息落盘后回填结果；写文件、命令等副作用工具会延后到
+  常规调度阶段，保证安全顺序。
+- provider 调用前会动态组装 system prompt 上下文，包括 workspace、工具列表、执行模式、
+  RAG 状态和关键安全约束。
+- runtime 会读取 `ECHOWEAVE.md`、`AGENTS.md`、`.echoweave/instructions.md`、`CLAUDE.md` 作为
+  有长度上限的项目级指令，让仓库约定、测试命令和风格要求能随会话继承；项目指令不能覆盖系统安全规则。
+- `echoweave-coding eval` 除了 pass/fail，也支持在 case 中声明 `expected_tools`、
+  `forbidden_tools`、`expected_rag_sources`、`expected_policy_blocks` 等字段，输出回答质量、
+  工具调用正确率、RAG 命中和策略拦截等行为级 scorecard。
+- `echoweave-coding eval --feedback-log <path>` 会把未达标的 scorecard 条目转成 hardening backlog，
+  作为后续补测试、补策略、补 RAG golden query 或项目说明的输入。
+- `echoweave-coding hardening-plan --audit-log logs/audit.jsonl --feedback-log logs/hardening.jsonl
+  --eval-out .echoweave/generated-hardening-eval.json` 会从审计日志生成 backlog，并把建议转换成可复跑的
+  eval fixture 草案，形成“日志 -> 指标 -> 建议 -> 回归用例”的自动加固链路。
+- harness policy DSL 不只约束工具、路径和命令，也能统一判断会话可用模型、Skill allowlist 和
+  RAG 开关，便于管理端把“哪些会话能用哪些能力”落成可审计策略。
+- shell policy 的每次决策都会带上 `category` 和 `risk_level`，例如 test/read 为低风险，
+  install/vcs_write 进入高风险审批，破坏性命令为 critical 拦截，便于 Web 管理端和审计报表展示。
+- 设置 `ECHOWEAVE_SANDBOX_MODE=docker` 后，`bash` 工具会把允许执行的命令包装到受限
+  `docker run --rm --network none --read-only` 容器中运行，并支持 `ECHOWEAVE_SANDBOX_IMAGE`、
+  `ECHOWEAVE_SANDBOX_MEMORY`、`ECHOWEAVE_SANDBOX_CPUS` 等环境变量调整镜像和资源限制。
+- 管理端 API 增加 `/api/audit` 和 `/api/hardening`，用于查看结构化审计指标、生成 hardening backlog
+  和 eval fixture；CLI 也提供 `patch-review`、`audit-inspect`、`sandbox-plan`、
+  `complex-repo-verify` 方便在没有 Web 页面时完成同样流程。
+- `echoweave-coding corecoder-status` 可直接查看上述 CoreCoder 风格能力的落地状态。
+
+## SSE
+
+SSE 事件流：
+
+```text
+http://127.0.0.1:8787/events
+```
+
+事件包含 `message.inbound`、`message.reply`、`message.error` 和 `heartbeat`。
+
+## Docker Compose
+
+```powershell
+Copy-Item D:\games\EchoWeave\config.docker.example.json D:\games\EchoWeave\config.docker.json
+docker compose up --build
+```
+
+初始化容器内 RAG schema：
+
+```powershell
+docker compose exec echoweave python -m echoweave_runtime.rag.init_db --dsn postgresql://echoweave:echoweave-password@postgres:5432/echoweave
+```
+
+服务默认监听：
+
+```text
+http://127.0.0.1:8787
+```
+
+## 验证
+
+```powershell
+python -m pytest
+```
+
+上线健康检查：
+
+```powershell
+D:\games\EchoWeave\scripts\verify-deploy.ps1 -Config D:\games\EchoWeave\config.local.json
+```
+
+测试已按领域拆分到 `tests/test_runtime_tools.py`、`tests/test_agent_core.py`、
+`tests/test_coding_agent.py`、`tests/test_harness.py`、`tests/test_social_backend.py`、
+`tests/test_adapters.py`、`tests/test_web.py`、`tests/test_rag.py`、`tests/test_cli_config.py`。
+覆盖平台适配器、审批、管理 API、多模型配置、会话沙盒隔离、RAG chunking、混合排序和
+harness 审计/指标。
+
+## 简历描述参考
+
+EchoWeave 可以描述为：
+
+> 一个自研社交平台 AI Coding Agent 网关，参考 AstrBot 的多平台适配思路和
+> pi-mono 的 Agent 分层思想，使用 Python 实现会话沙盒、多模型接入、RAG、
+> skill 管理、审批权限、harness 审计与反馈闭环。
+
+## English Brief
+
+EchoWeave is a local social-platform AI coding-agent gateway. It combines a Python
+coding-agent runtime, AstrBot-style platform adapters, per-conversation
+sandboxes, model profiles, optional RAG, skills, approvals, and a harness layer
+for policy, audit logs, metrics, and feedback. The main documentation is in
+Chinese; this English section is only a short fallback.

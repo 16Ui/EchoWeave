@@ -1,0 +1,11 @@
+.git
+.pytest_cache
+.test-data
+pytest-cache-files-*
+logs
+sandboxes
+uideus-data
+__pycache__
+*.pyc
+.env
+config.local.json
