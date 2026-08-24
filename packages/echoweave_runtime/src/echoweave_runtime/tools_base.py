@@ -5,11 +5,13 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from echoweave_runtime.governance import evaluate_runtime_path, evaluate_runtime_tool
+from echoweave_runtime.tool_invocations import ToolEffect, resolve_tool_effect
 
 class Tool(Protocol):
     name: str
     description: str
     input_schema: dict[str, Any]
+    effect: ToolEffect | str
 
     def execute(self, arguments: dict[str, Any]) -> str:
         ...
@@ -117,6 +119,7 @@ class ToolRegistry:
                 "name": tool.name,
                 "description": tool.description,
                 "source": self._sources.get(tool.name, "builtin"),
+                "effect": resolve_tool_effect(tool.name, tool).value,
             }
             for tool in self._tools.values()
         ]

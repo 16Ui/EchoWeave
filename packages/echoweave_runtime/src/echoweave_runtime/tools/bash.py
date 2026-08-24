@@ -14,6 +14,7 @@ from echoweave_runtime.tools_base import resolve_path
 
 class BashTool:
     name = "bash"
+    effect = "non_idempotent"
     description = "Run a shell command"
     input_schema = {
         "type": "object",

@@ -10,6 +10,7 @@ from echoweave_runtime.tools_base import resolve_path
 
 class GrepTool:
     name = "grep"
+    effect = "read_only"
     description = "Search text by regex pattern"
     input_schema = {
         "type": "object",

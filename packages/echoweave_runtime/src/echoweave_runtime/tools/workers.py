@@ -11,6 +11,7 @@ from echoweave_runtime.tools_base import resolve_path
 
 class WorkersTool:
     name = "workers"
+    effect = "non_idempotent"
     description = "Plan and run multiple isolated worker subtasks with write-conflict diagnostics"
     input_schema = {
         "type": "object",

@@ -68,6 +68,7 @@ EchoWeave
 - AstrBot 基础命令桥：通过显式授权的独立 Worker 运行兼容插件，并提供生命周期、请求关联和超时终止。
 - 插件执行策略：敏感能力需声明并授权，Worker 使用隔离模式、环境白名单和有界 JSON 协议。
 - 可恢复 Turn 协议：结构化 Outcome、显式状态机、失败分类、起始 checkpoint 与跨层 trace 关联。
+- Tool Invocation 账本：稳定调用键、参数冲突检测、结果复用和基于副作用等级的中断重放保护。
 - Docker Compose：包含 EchoWeave + PostgreSQL + pgvector 的部署形态。
 
 可恢复执行的当前边界和后续幂等设计见

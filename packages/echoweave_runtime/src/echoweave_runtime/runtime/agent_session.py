@@ -21,6 +21,12 @@ from echoweave_runtime.runtime.observer import NullRuntimeObserver, RuntimeEvent
 from echoweave_runtime.session.schema import sanitize_value
 from echoweave_runtime.session.store import SessionStore
 from echoweave_runtime.session.summary import build_compaction_summary, build_summary
+from echoweave_runtime.tool_invocations import (
+    ToolEffect,
+    ToolInvocationBlockedError,
+    ToolInvocationLedger,
+    resolve_tool_effect,
+)
 from echoweave_runtime.tools.bash import BashTool
 from echoweave_runtime.tools.policy import PolicyVerdict
 from echoweave_runtime.types import ToolExecutionMode
@@ -263,7 +269,6 @@ _PROMPT_INJECTION_HINTS = (
 )
 
 
-_PARALLEL_SAFE_TOOLS = {"read", "ls", "find", "grep", "agent", "tool_search"}
 _STREAMING_EAGER_SAFE_TOOLS = {"read", "ls", "find", "grep", "tool_search"}
 
 
@@ -272,7 +277,18 @@ def _parallel_execution_plan(entries: list[dict[str, Any]]) -> tuple[str, str]:
     runnable = [entry for entry in entries if entry.get("setup_error") is None and entry.get("tool") is not None]
     if len(runnable) <= 1:
         return "sequential", "single runnable tool call"
-    unsafe_tools = sorted({str(entry.get("tool_name")) for entry in runnable if str(entry.get("tool_name")) not in _PARALLEL_SAFE_TOOLS})
+    unsafe_tools = sorted(
+        {
+            str(entry.get("tool_name"))
+            for entry in runnable
+            if resolve_tool_effect(
+                str(entry.get("tool_name")),
+                entry.get("tool"),
+                entry.get("tool_input"),
+            )
+            is not ToolEffect.READ_ONLY
+        }
+    )
     if unsafe_tools:
         return "sequential", "unsafe parallel tools: " + ", ".join(unsafe_tools)
     return "parallel", "all runnable tools are read-only"
@@ -431,6 +447,7 @@ class AgentSessionRuntime:
         self.tool_execution_mode: ToolExecutionMode = tool_execution_mode
         self.provider_capabilities = provider_capabilities
         self.retrieval_enabled = retrieval_enabled
+        self.tool_invocation_ledger = ToolInvocationLedger(session_store)
         self._active_turn_id: str | None = None
         self._active_trace_id: str | None = None
         self._event_seq = 0
@@ -482,6 +499,67 @@ class AgentSessionRuntime:
 
     def _build_tool_batch_payload(self, batch_id: str, batch_size: int, batch_index: int) -> dict[str, Any]:
         return {"id": batch_id, "size": batch_size, "index": batch_index}
+
+    def _execute_tool_with_ledger(
+        self,
+        session_path: Path,
+        *,
+        tool_id: str,
+        tool_name: str,
+        tool_input: Any,
+        tool: Any,
+    ) -> Any:
+        turn_id = self._active_turn_id or "unscoped-turn"
+        decision = self.tool_invocation_ledger.prepare(
+            session_path,
+            turn_id=turn_id,
+            trace_id=self._active_trace_id,
+            tool_call_id=tool_id,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            effect=resolve_tool_effect(tool_name, tool, tool_input),
+        )
+        if decision.action == "reuse":
+            outcome = decision.outcome or {}
+            if outcome.get("status") == "ok":
+                return sanitize_value(outcome.get("content"))
+            raise ToolInvocationBlockedError(
+                f"durable tool result is an error: {outcome.get('error', 'unknown tool error')}"
+            )
+        if decision.action != "execute":
+            raise ToolInvocationBlockedError(
+                f"{decision.action} tool invocation {decision.invocation_key}: {decision.reason}"
+            )
+        try:
+            _recorded_validate_tool_arguments(
+                tool_name,
+                tool_input,
+                getattr(tool, "input_schema", None),
+                tool,
+            )
+            result = tool.execute(tool_input)
+        except Exception as exc:
+            self.tool_invocation_ledger.complete(
+                session_path,
+                decision,
+                turn_id=turn_id,
+                trace_id=self._active_trace_id,
+                tool_call_id=tool_id,
+                tool_name=tool_name,
+                outcome={"status": "error", "error": f"{type(exc).__name__}: {exc}"},
+            )
+            raise
+        normalized = sanitize_value(result)
+        self.tool_invocation_ledger.complete(
+            session_path,
+            decision,
+            turn_id=turn_id,
+            trace_id=self._active_trace_id,
+            tool_call_id=tool_id,
+            tool_name=tool_name,
+            outcome={"status": "ok", "content": normalized},
+        )
+        return normalized
 
     def _emit_tool_execution_event(
         self,
@@ -631,8 +709,13 @@ class AgentSessionRuntime:
                 status="running",
                 event_payload={**update_payload, "streaming_eager": True},
             )
-            _recorded_validate_tool_arguments(tool_name, tool_input, getattr(tool, "input_schema", None), tool)
-            result = tool.execute(tool_input)
+            result = self._execute_tool_with_ledger(
+                session_path,
+                tool_id=tool_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool=tool,
+            )
         except Exception as exc:
             error = sanitize_value(f"{type(exc).__name__}: {exc}")
             self.session_store.append(
@@ -1695,10 +1778,20 @@ class AgentSessionRuntime:
             if self.tool_execution_mode == "parallel":
                 pending_parallel_calls: list[dict[str, Any]] = []
 
-                def _execute_parallel_tool_call(tool_name: str, tool_input: Any, tool: Any) -> dict[str, Any]:
+                def _execute_parallel_tool_call(
+                    tool_id: str,
+                    tool_name: str,
+                    tool_input: Any,
+                    tool: Any,
+                ) -> dict[str, Any]:
                     try:
-                        _recorded_validate_tool_arguments(tool_name, tool_input, getattr(tool, "input_schema", None), tool)
-                        result = tool.execute(tool_input)
+                        result = self._execute_tool_with_ledger(
+                            session_path,
+                            tool_id=tool_id,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            tool=tool,
+                        )
                     except Exception as exc:
                         return {
                             "status": "error",
@@ -2035,6 +2128,7 @@ class AgentSessionRuntime:
                             tool_index = int(entry["tool_index"])
                             future_by_index[tool_index] = executor.submit(
                                 _execute_parallel_tool_call,
+                                str(entry["tool_id"]),
                                 str(entry["tool_name"]),
                                 sanitize_value(entry["tool_input"]),
                                 entry["tool"],
@@ -2074,6 +2168,7 @@ class AgentSessionRuntime:
                             }
                         elif entry.get("tool") is not None:
                             execution_outcome = _execute_parallel_tool_call(
+                                str(entry["tool_id"]),
                                 str(entry["tool_name"]),
                                 sanitize_value(entry["tool_input"]),
                                 entry["tool"],
@@ -2217,8 +2312,13 @@ class AgentSessionRuntime:
                             "parent_event_id": update_payload.get("parent_event_id"),
                         },
                     )
-                    _recorded_validate_tool_arguments(tool_name, tool_input, getattr(tool, "input_schema", None), tool)
-                    result = tool.execute(tool_input)
+                    result = self._execute_tool_with_ledger(
+                        session_path,
+                        tool_id=tool_id,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        tool=tool,
+                    )
                 except Exception as exc:
                     # 工具失败时统一写 tool_error，并把错误包装成 tool_result 回给模型继续推理。
                     error_message = sanitize_value(f"{type(exc).__name__}: {exc}")

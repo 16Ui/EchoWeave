@@ -41,7 +41,7 @@ EchoWeave 的主线是可扩展的个人 Agent Runtime。实习经验只用于�
 
 - 仓库级上下文构建和结构化任务状态；
 - 受控文件修改、Shell、测试和 Git 工具；
-- [进行中] 高风险审批、Checkpoint、Resume 与失败恢复：已完成起始 checkpoint 和可恢复 Turn 协议，下一步为 Tool Call 幂等账本；
+- [进行中] 高风险审批、Checkpoint、Resume 与失败恢复：已完成起始 checkpoint、可恢复 Turn 协议和 Tool Invocation 幂等账本，下一步为受控 `recover_turn`；
 - 轨迹级 Eval 和可复现软件修复任务集。
 
 ## M5：可靠性与公开证据

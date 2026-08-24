@@ -15,6 +15,7 @@ from echoweave_runtime.tools_base import resolve_path
 
 class AgentTool:
     name = "agent"
+    effect = "non_idempotent"
     description = "Run an isolated sub-agent task over the workspace"
     input_schema = {
         "type": "object",

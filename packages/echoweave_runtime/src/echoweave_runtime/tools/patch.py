@@ -13,6 +13,7 @@ from echoweave_runtime.tools_base import resolve_path
 
 class PatchTool:
     name = "patch"
+    effect = "non_idempotent"
     description = "Stage, review, apply, discard, or rollback worker patches with explicit confirmation"
     input_schema = {
         "type": "object",

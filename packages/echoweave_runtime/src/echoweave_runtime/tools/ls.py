@@ -9,6 +9,7 @@ from echoweave_runtime.tools_base import resolve_path
 
 class LsTool:
     name = "ls"
+    effect = "read_only"
     description = "List files and directories"
     input_schema = {
         "type": "object",

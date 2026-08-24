@@ -8,6 +8,7 @@ from echoweave_runtime.lifecycle import (
     RuntimeStartupError,
 )
 from echoweave_runtime.events import AgentEvent, Attachment, EventTypes, InboundMessage, OutboundMessage
+from echoweave_runtime.tool_invocations import ToolEffect, ToolInvocationLedger
 
 __all__ = [
     "LifecycleComponent",
@@ -22,4 +23,6 @@ __all__ = [
     "EventTypes",
     "InboundMessage",
     "OutboundMessage",
+    "ToolEffect",
+    "ToolInvocationLedger",
 ]

@@ -34,7 +34,25 @@ created -> running -> completed
    +-----------> failed / timed_out / cancelled
 ```
 
-终态不能重新进入运行态。`waiting_for_tool` 和 `suspended` 已纳入协议，但尚未作为自动恢复依据；在工具幂等语义完成前，不应把“存在 checkpoint”误称为“可以安全重放”。
+终态不能重新进入运行态。`waiting_for_tool` 和 `suspended` 已纳入协议，但尚未作为自动恢复依据。
+
+## Tool Invocation 账本
+
+串行、并行和流式工具路径共用 append-only invocation ledger。每次有效工具调用由两部分标识：
+
+- identity：`session_id + turn_id + tool_call_id`，表示逻辑调用位置；
+- fingerprint：工具名和规范化参数的 SHA-256，表示调用内容。
+
+两者共同生成稳定 `invocation_key`。相同 identity 如果出现不同 fingerprint，会写入 `tool.invocation_blocked` 并拒绝执行，避免模型或恢复逻辑悄悄改变已经开始的调用。账本事件包括：
+
+- `tool.invocation_started`：副作用执行前持久化；
+- `tool.invocation_completed`：保存成功结果或结构化错误；
+- `tool.invocation_reused`：检测到 durable result，直接复用而不再次执行工具；
+- `tool.invocation_blocked`：参数冲突、并发重复或无法判断副作用是否已发生。
+
+工具需要声明副作用等级：`read_only`、`idempotent_write`、`non_idempotent` 或 `unknown`。扩展工具未声明时默认为 `unknown`。分类也可以根据参数动态收紧，例如 `write(overwrite=false)` 会从 `idempotent_write` 降级为 `non_idempotent`。
+
+进程崩溃后如果只留下 started 事件：只读和幂等写工具允许产生下一次 attempt；非幂等和未知工具进入 indeterminate 状态，默认禁止自动重放。并行批次也使用同一账本锁，防止同一 Runtime 内的重复调用同时穿透。
 
 ## 恢复边界
 
@@ -44,15 +62,19 @@ created -> running -> completed
 - 成功、运行失败与超时都形成结构化终态；
 - checkpoint 即使遇到后续失败仍会保留；
 - 旧调用方不会因 API 改造改变异常类型；
-- 故障注入测试覆盖成功关联、超时分类和终态转换约束。
+- 已完成调用可复用 durable result，避免重复副作用；
+- 未完成调用按照工具副作用等级决定安全重试或阻断；
+- 故障注入测试覆盖成功关联、超时、checkpoint 故障、调用冲突、结果复用和中断重放决策。
 
 当前尚未保证：
 
-- 工具副作用的 exactly-once；
+- 外部系统与本地账本之间的事务型 exactly-once；
 - 进程重启后自动续跑；
 - Provider 级重试预算与退避；
 - 并行工具批次的部分完成恢复。
 
+这里仍然不宣称严格 exactly-once：工具完成副作用后、`tool.invocation_completed` 落盘前仍存在不可消除的崩溃窗口。除非外部工具支持事务或同一个 idempotency key，这个窗口只能通过“安全工具重试、危险工具阻断、人工确认或补偿操作”处理。
+
 ## 下一阶段
 
-下一切片将在现有 `tool_call/tool_result/tool_error` 事件上增加稳定 invocation key 与工具副作用分类：纯读工具可安全重放，写入工具需要结果账本或补偿策略，高风险工具默认禁止自动重放。完成后再实现 `recover_turn(checkpoint_id)`，避免产生“恢复成功但副作用执行两次”的隐蔽错误。
+下一切片实现受控 `recover_turn(checkpoint_id)`：恢复原逻辑 `turn_id`，重建 checkpoint 后的模型上下文，让 invocation ledger 决定复用、重试或暂停，并把 indeterminate 调用暴露给用户确认，而不是静默继续执行。

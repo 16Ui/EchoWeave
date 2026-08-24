@@ -9,6 +9,7 @@ from echoweave_runtime.extensions.manager import ExtensionManager
 
 class SkillCallTool:
     name = "skill_call"
+    effect = "unknown"
     description = "Execute a registered local skill"
     input_schema = {
         "type": "object",

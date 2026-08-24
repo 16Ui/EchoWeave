@@ -9,6 +9,7 @@ from echoweave_runtime.tools_base import resolve_path
 
 class ReadTool:
     name = "read"
+    effect = "read_only"
     description = "Read a file from disk"
     input_schema = {
         "type": "object",

@@ -9,6 +9,7 @@ from echoweave_runtime.tools_base import resolve_path
 
 class WriteTool:
     name = "write"
+    effect = "idempotent_write"
     description = "Write full content to a file; use edit for small precise changes"
     input_schema = {
         "type": "object",
@@ -23,6 +24,9 @@ class WriteTool:
 
     def __init__(self, cwd: Path) -> None:
         self.cwd = cwd
+
+    def classify_effect(self, arguments: dict[str, str]) -> str:
+        return "non_idempotent" if arguments.get("overwrite") is False else self.effect
 
     def execute(self, arguments: dict[str, str]) -> str:
         raw_path = arguments["path"]

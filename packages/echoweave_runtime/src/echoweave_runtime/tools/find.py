@@ -9,6 +9,7 @@ from echoweave_runtime.tools_base import resolve_path
 
 class FindTool:
     name = "find"
+    effect = "read_only"
     description = "Find files and directories by glob pattern"
     input_schema = {
         "type": "object",

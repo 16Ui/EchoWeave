@@ -9,6 +9,7 @@ from echoweave_runtime.tools_base import resolve_path
 
 class EditTool:
     name = "edit"
+    effect = "non_idempotent"
     description = "Replace exact text in a file"
     input_schema = {
         "type": "object",

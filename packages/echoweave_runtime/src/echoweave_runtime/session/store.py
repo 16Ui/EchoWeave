@@ -505,7 +505,11 @@ class SessionStore:
             "turn_count": sum(1 for node in nodes if node["type"] == "turn"),
             "tool_count": sum(1 for node in nodes if node["type"] == "tool"),
             "error_count": sum(1 for node in nodes if node["status"] == "error"),
-            "blocked_count": sum(1 for node in nodes if node["status"] == "blocked"),
+            "blocked_count": sum(1 for node in nodes if node["status"] == "blocked")
+            + sum(1 for event in events if event.type == "tool.invocation_blocked"),
+            "tool_invocation_count": sum(1 for event in events if event.type == "tool.invocation_started"),
+            "tool_invocation_reuse_count": sum(1 for event in events if event.type == "tool.invocation_reused"),
+            "tool_invocation_blocked_count": sum(1 for event in events if event.type == "tool.invocation_blocked"),
             "duration_ms": None,
         }
         return {"nodes": nodes, "edges": edges, "stats": stats}

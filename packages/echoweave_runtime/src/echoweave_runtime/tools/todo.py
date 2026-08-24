@@ -9,6 +9,7 @@ from echoweave_runtime.governance import record_runtime_audit
 
 class TodoTool:
     name = "todo"
+    effect = "non_idempotent"
     description = "Track coding-agent task todos in the workspace"
     input_schema = {
         "type": "object",

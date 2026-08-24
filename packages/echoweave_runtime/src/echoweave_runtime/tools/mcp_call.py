@@ -9,6 +9,7 @@ from echoweave_runtime.extensions.manager import ExtensionManager
 
 class McpCallTool:
     name = "mcp_call"
+    effect = "unknown"
     description = "Call an MCP server method"
     input_schema = {
         "type": "object",

@@ -8,6 +8,7 @@ from echoweave_runtime.tools_base import ToolRegistry
 
 class ToolSearchTool:
     name = "tool_search"
+    effect = "read_only"
     description = "Search and list currently registered tools by name or description"
     input_schema = {
         "type": "object",
@@ -46,6 +47,7 @@ class ToolSearchTool:
         if not items:
             return "(no matching tools)"
         return "\n".join(
-            f"- {item['name']} [{item.get('source', 'unknown')}]: {item.get('description', '')}"
+            f"- {item['name']} [{item.get('source', 'unknown')}] "
+            f"(effect={item.get('effect', 'unknown')}): {item.get('description', '')}"
             for item in items
         )
