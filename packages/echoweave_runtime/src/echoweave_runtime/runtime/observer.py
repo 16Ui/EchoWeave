@@ -63,11 +63,8 @@ def summarize_runtime_events(events: list[dict[str, Any]]) -> dict[str, Any]:
                 blocked_count += 1
                 success = False
                 error_types["policy_deny"] = error_types.get("policy_deny", 0) + 1
-        elif event_name == "turn_end":
-            turn = payload.get("turn") if isinstance(payload.get("turn"), dict) else {}
-            reply = str(turn.get("reply", ""))
-            if "retry" in reply.lower():
-                retry_count += 1
+        elif event_name == "provider.retry_scheduled":
+            retry_count += 1
 
     sorted_error_types = sorted(error_types.items(), key=lambda pair: (-pair[1], pair[0]))
     return {

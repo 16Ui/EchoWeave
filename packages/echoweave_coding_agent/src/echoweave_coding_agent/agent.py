@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ from echoweave_runtime.app import build_registry
 from echoweave_runtime.extensions.manager import ExtensionManager, build_extension_manager
 from echoweave_runtime.models.base import ModelClient
 from echoweave_runtime.models.factory import ProviderCapabilities
+from echoweave_runtime.provider_reliability import ProviderReliabilityConfig
 from echoweave_runtime.session.store import SessionStore
 from echoweave_runtime.tool_invocations import InvocationResolution
 from echoweave_runtime.types import ToolExecutionMode
@@ -36,6 +37,7 @@ class CodingAgentConfig:
     tool_execution_mode: ToolExecutionMode = "sequential"
     provider_capabilities: ProviderCapabilities | None = None
     retrieval_enabled: bool = True
+    provider_reliability: ProviderReliabilityConfig = field(default_factory=ProviderReliabilityConfig)
     metadata: dict[str, Any] | None = None
 
 
@@ -69,6 +71,7 @@ class CodingAgent:
                 tool_execution_mode=config.tool_execution_mode,
                 provider_capabilities=config.provider_capabilities,
                 retrieval_enabled=config.retrieval_enabled,
+                provider_reliability=config.provider_reliability,
                 metadata={"workspace": str(workspace), **(config.metadata or {})},
             )
         )

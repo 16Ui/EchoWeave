@@ -18,7 +18,7 @@ EchoWeave 的主线是可扩展的个人 Agent Runtime。实习经验只用于�
 - 将 Channel、Provider、Plugin 逐步接入统一生命周期；
 - 将入口层与 Agent Loop 解耦；
 - [已完成首个切片] 为异常、取消、超时建立 Turn 状态机、结构化 Outcome、失败分类与持久化状态事件；
-- 在 Provider 重试策略接入后补齐统一重试结果模型。
+- [已完成首个切片] Provider 临时故障归入结构化、可恢复的 `provider` failure，并携带熔断恢复时间。
 
 ## M2：插件与能力系统
 
@@ -41,12 +41,12 @@ EchoWeave 的主线是可扩展的个人 Agent Runtime。实习经验只用于�
 
 - 仓库级上下文构建和结构化任务状态；
 - 受控文件修改、Shell、测试和 Git 工具；
-- [进行中] 高风险审批、Checkpoint、Resume 与失败恢复：已完成起始 checkpoint、可恢复 Turn 协议、Tool Invocation 幂等账本、受控 `recover_turn` 和 indeterminate 人工处置，下一步为 Provider 重试预算；
+- [进行中] 高风险审批、Checkpoint、Resume 与失败恢复：已完成起始 checkpoint、可恢复 Turn、Tool Invocation 幂等账本、受控恢复、indeterminate 人工处置和 Provider 可靠性层，下一步为并行批次部分恢复；
 - 轨迹级 Eval 和可复现软件修复任务集。
 
 ## M5：可靠性与公开证据
 
-- timeout、retry、circuit breaker 与降级契约；
-- 插件和 Provider 故障注入；
+- [已完成首个切片] Provider timeout/retry budget/backoff/Retry-After/stream boundary/circuit breaker 契约；
+- [进行中] 插件和 Provider 故障注入：Provider 单元与 Runtime 集成路径已覆盖；
 - Golden Set、回归阈值和 CI 门禁；
 - 架构说明、演示视频和性能/可靠性报告。

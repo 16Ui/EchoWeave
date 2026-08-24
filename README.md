@@ -71,10 +71,12 @@ EchoWeave
 - Tool Invocation 账本：稳定调用键、参数冲突检测、结果复用和基于副作用等级的中断重放保护。
 - 受控 Turn 恢复：从 checkpoint 重建可见历史，以同一逻辑 Turn 的新 attempt 继续，并在危险副作用不确定时暂停。
 - 人工恢复决策：支持补录工具结果、一次性授权重试或放弃 Turn，并保留操作者与原因审计。
+- Provider 可靠性层：单请求指数退避、Turn 级共享重试预算、`Retry-After`、流式安全边界和进程内熔断状态机。
 - Docker Compose：包含 EchoWeave + PostgreSQL + pgvector 的部署形态。
 
 可恢复执行的当前边界和后续幂等设计见
-[docs/RECOVERABLE_AGENT_RUNTIME.md](docs/RECOVERABLE_AGENT_RUNTIME.md)。
+[docs/RECOVERABLE_AGENT_RUNTIME.md](docs/RECOVERABLE_AGENT_RUNTIME.md)，Provider 故障处理契约见
+[docs/PROVIDER_RELIABILITY.md](docs/PROVIDER_RELIABILITY.md)。
 
 ## 快速启动
 

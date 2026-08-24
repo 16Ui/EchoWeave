@@ -17,6 +17,10 @@ from echoweave_runtime.extensions.manager import ExtensionManager
 from echoweave_runtime.governance import record_runtime_audit
 from echoweave_runtime.models.base import ModelClient, StreamOptions
 from echoweave_runtime.models.factory import ProviderCapabilities
+from echoweave_runtime.provider_reliability import (
+    ProviderReliabilityConfig,
+    ProviderReliabilityController,
+)
 from echoweave_runtime.runtime.observer import NullRuntimeObserver, RuntimeEventDispatcher
 from echoweave_runtime.session.schema import sanitize_value
 from echoweave_runtime.session.store import SessionStore
@@ -439,6 +443,7 @@ class AgentSessionRuntime:
         tool_execution_mode: ToolExecutionMode = "sequential",
         provider_capabilities: ProviderCapabilities | None = None,
         retrieval_enabled: bool = True,
+        provider_reliability_config: ProviderReliabilityConfig | None = None,
     ) -> None:
         self.model_client = model_client
         self.tool_registry = tool_registry
@@ -449,6 +454,7 @@ class AgentSessionRuntime:
         self.tool_execution_mode: ToolExecutionMode = tool_execution_mode
         self.provider_capabilities = provider_capabilities
         self.retrieval_enabled = retrieval_enabled
+        self.provider_reliability = ProviderReliabilityController(provider_reliability_config)
         self.tool_invocation_ledger = ToolInvocationLedger(session_store)
         self._active_turn_id: str | None = None
         self._active_trace_id: str | None = None
@@ -1142,6 +1148,7 @@ class AgentSessionRuntime:
         session_state = self.session_store.load_snapshot(session_path)
         session_id = session_state.header.id
         self._begin_turn_context(turn_id=turn_id, trace_id=trace_id)
+        provider_retry_budget = self.provider_reliability.new_budget()
         user_message = {"role": "user", "content": sanitize_value(user_input)}
         history = [*history, user_message]
         self.session_store.append(session_path, "message", user_message)
@@ -1532,6 +1539,22 @@ class AgentSessionRuntime:
             metadata = before_provider_context.metadata if isinstance(before_provider_context.metadata, dict) else {}
             model_options = _build_model_options(metadata)
             call_path = _select_model_call_path(self.provider_capabilities, self.model_client)
+            provider_key = str(
+                metadata.get("provider")
+                or getattr(self.model_client, "provider", None)
+                or type(self.model_client).__name__
+            )
+
+            def _record_provider_reliability_event(event_type: str, event_payload: dict[str, Any]) -> None:
+                durable_payload = {
+                    **sanitize_value(event_payload),
+                    "turn_id": self._active_turn_id,
+                    "trace_id": self._active_trace_id,
+                    "call_path": call_path,
+                }
+                self.session_store.append(session_path, event_type, durable_payload)
+                self.emit(session_id, event_type, {"provider": durable_payload})
+
             tools = self.tool_registry.as_anthropic_tools()
             prompt_context_token = set_prompt_context(
                 {
@@ -1551,20 +1574,35 @@ class AgentSessionRuntime:
             try:
                 if call_path == "stream":
                     stream_method = getattr(self.model_client, "stream")
-                    stream_events = stream_method(messages, tools, options=model_options)
+                    stream_events = self.provider_reliability.stream(
+                        lambda: stream_method(messages, tools, options=model_options),
+                        provider_key=provider_key,
+                        budget=provider_retry_budget,
+                        on_event=_record_provider_reliability_event,
+                    )
                 elif call_path == "complete":
                     complete_method = getattr(self.model_client, "complete")
-                    response = complete_method(
-                        messages,
-                        tools,
-                        options=model_options,
+                    response = self.provider_reliability.call(
+                        lambda: complete_method(
+                            messages,
+                            tools,
+                            options=model_options,
+                        ),
+                        provider_key=provider_key,
+                        budget=provider_retry_budget,
+                        on_event=_record_provider_reliability_event,
                     )
                     stream_events = _response_to_stream_events(response)
                 else:
-                    response = self.model_client.generate(
-                        messages,
-                        tools,
-                        options=model_options,
+                    response = self.provider_reliability.call(
+                        lambda: self.model_client.generate(
+                            messages,
+                            tools,
+                            options=model_options,
+                        ),
+                        provider_key=provider_key,
+                        budget=provider_retry_budget,
+                        on_event=_record_provider_reliability_event,
                     )
                     stream_events = _response_to_stream_events(response)
 

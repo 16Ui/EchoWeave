@@ -124,17 +124,20 @@ recovered = core.recover_turn(
 - checkpoint 可重建历史，同一逻辑 Turn 可通过新 attempt 受控恢复；
 - indeterminate 工具会暂停恢复，而不是被 Agent Loop 静默吞掉；
 - 人工补录、单次重试授权和放弃操作均形成可审计事件；
+- Provider 临时故障只重试当前模型请求，不重放整个 Agent Loop；
+- 单请求 attempt 上限与 Turn 级共享 retry budget 同时约束重试放大；
+- 流式调用仅在尚未输出任何事件时重试，部分输出后中断会明确失败；
+- Provider 连续临时故障触发进程内 closed/open/half-open 熔断；
 - 故障注入测试覆盖成功关联、超时、checkpoint 故障、调用冲突、结果复用和中断重放决策。
 
 当前尚未保证：
 
 - 外部系统与本地账本之间的事务型 exactly-once；
 - 进程重启后自动续跑；
-- Provider 级重试预算与退避；
+- 跨进程共享或持久化的 Provider 熔断状态；
 - 并行工具批次的部分完成恢复。
 
 这里仍然不宣称严格 exactly-once：工具完成副作用后、`tool.invocation_completed` 落盘前仍存在不可消除的崩溃窗口。除非外部工具支持事务或同一个 idempotency key，这个窗口只能通过“安全工具重试、危险工具阻断、人工确认或补偿操作”处理。
 
-## 下一阶段
-
-下一切片加入 Provider 级重试预算、指数退避和熔断。Provider 网络抖动只允许在明确预算内重试，并与工具副作用恢复保持分层，避免模型重试隐式重复整个 Agent Loop。
+Provider 可靠性层的分类、预算、流式边界、熔断状态和事件协议见
+[PROVIDER_RELIABILITY.md](PROVIDER_RELIABILITY.md)。下一切片将继续处理并行工具批次的部分完成恢复与进程重启后的运行接管。

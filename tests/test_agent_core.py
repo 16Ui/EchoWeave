@@ -256,7 +256,7 @@ class _RecoveringModel(ModelClient):
         self.index = 0
 
     def generate(self, messages, tools, options=None):
-        response = self.responses[self.index]
+        response = self.responses[min(self.index, len(self.responses) - 1)]
         self.index += 1
         if isinstance(response, BaseException):
             raise response

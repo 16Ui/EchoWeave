@@ -7,6 +7,7 @@ from typing import Any
 from echoweave_runtime.extensions.manager import ExtensionManager
 from echoweave_runtime.models.base import ModelClient
 from echoweave_runtime.models.factory import ProviderCapabilities
+from echoweave_runtime.provider_reliability import ProviderReliabilityConfig
 from echoweave_runtime.session.store import SessionStore
 from echoweave_runtime.tool_invocations import InvocationResolution
 from echoweave_runtime.tools_base import ToolRegistry
@@ -26,6 +27,7 @@ class AgentCoreConfig:
     tool_execution_mode: ToolExecutionMode = "sequential"
     provider_capabilities: ProviderCapabilities | None = None
     retrieval_enabled: bool = True
+    provider_reliability: ProviderReliabilityConfig = field(default_factory=ProviderReliabilityConfig)
     hooks: tuple[Any, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 

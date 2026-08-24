@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from echoweave_agent_core.types import TurnResult
+from echoweave_runtime.provider_reliability import (
+    ProviderCircuitOpenError,
+    is_retryable_provider_error,
+)
 from echoweave_runtime.tool_invocations import ToolInvocationBlockedError
 
 
@@ -86,6 +90,7 @@ class TurnFailureKind(str, Enum):
     PERSISTENCE = "persistence"
     CHECKPOINT = "checkpoint"
     HOOK = "hook"
+    PROVIDER = "provider"
     RUNTIME = "runtime"
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"
@@ -203,17 +208,27 @@ def classify_turn_failure(error: BaseException, stage: str) -> TurnFailure:
     elif stage in {"before_hook", "after_hook", "error_hook"}:
         kind = TurnFailureKind.HOOK
         retryable = False
+    elif isinstance(error, ProviderCircuitOpenError):
+        kind = TurnFailureKind.PROVIDER
+        retryable = True
     elif stage == "runtime":
-        kind = TurnFailureKind.RUNTIME
-        retryable = isinstance(error, (ConnectionError, OSError))
+        retryable = isinstance(error, Exception) and is_retryable_provider_error(error)
+        kind = TurnFailureKind.PROVIDER if retryable else TurnFailureKind.RUNTIME
     else:
         kind = TurnFailureKind.INTERNAL
         retryable = False
+    details = {}
+    if isinstance(error, ProviderCircuitOpenError):
+        details = {
+            "provider_key": error.provider_key,
+            "retry_after_seconds": error.retry_after_seconds,
+        }
     return TurnFailure(
         kind=kind,
         stage=stage,
         error_type=type(error).__name__,
         message=str(error),
         retryable=retryable,
+        details=details,
         _cause=error,
     )

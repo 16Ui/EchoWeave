@@ -549,6 +549,16 @@ class SessionStore:
             "tool_invocation_blocked_count": sum(1 for event in events if event.type == "tool.invocation_blocked"),
             "tool_invocation_resolution_count": sum(1 for event in events if event.type == "tool.invocation_resolved"),
             "recovery_attempt_count": sum(1 for event in events if event.type == "turn.recovery_started"),
+            "provider_retry_count": sum(1 for event in events if event.type == "provider.retry_scheduled"),
+            "provider_retry_exhausted_count": sum(
+                1 for event in events if event.type == "provider.retry_exhausted"
+            ),
+            "provider_circuit_open_count": sum(
+                1 for event in events if event.type == "provider.circuit_opened"
+            ),
+            "provider_stream_interrupted_count": sum(
+                1 for event in events if event.type == "provider.stream_interrupted"
+            ),
             "duration_ms": None,
         }
         return {"nodes": nodes, "edges": edges, "stats": stats}

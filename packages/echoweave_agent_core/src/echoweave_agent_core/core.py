@@ -65,6 +65,7 @@ class AgentCore:
             tool_execution_mode=config.tool_execution_mode,
             provider_capabilities=config.provider_capabilities,
             retrieval_enabled=config.retrieval_enabled,
+            provider_reliability_config=config.provider_reliability,
         )
         return cls(runtime, config.session_store, hooks=config.hooks, metadata=config.metadata)
 

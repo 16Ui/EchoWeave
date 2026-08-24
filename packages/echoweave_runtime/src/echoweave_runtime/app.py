@@ -26,6 +26,7 @@ from echoweave_runtime.tools.workers import WorkersTool
 from echoweave_runtime.tools_base import ToolConflictPolicy, ToolRegistry
 from echoweave_runtime.models.base import ModelClient
 from echoweave_runtime.models.factory import ProviderCapabilities
+from echoweave_runtime.provider_reliability import ProviderReliabilityConfig
 from echoweave_runtime.session.store import SessionStore
 from echoweave_runtime.types import ToolExecutionMode
 
@@ -97,6 +98,7 @@ def build_runtime(
     tool_execution_mode: ToolExecutionMode = "sequential",
     provider_capabilities: ProviderCapabilities | None = None,
     retrieval_enabled: bool = True,
+    provider_reliability_config: ProviderReliabilityConfig | None = None,
 ) -> AgentSessionRuntime:
     """组装运行时：把模型、工具、会话存储和事件分发器接成可执行主链。"""
     observer = JsonLineRuntimeObserver(event_sink) if event_sink is not None else NullRuntimeObserver()
@@ -111,4 +113,5 @@ def build_runtime(
         tool_execution_mode=tool_execution_mode,
         provider_capabilities=provider_capabilities,
         retrieval_enabled=retrieval_enabled,
+        provider_reliability_config=provider_reliability_config,
     )
