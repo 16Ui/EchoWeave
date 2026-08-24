@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from echoweave_social.schema import EchoWeaveEvent, EchoWeaveReply
+from echoweave_runtime.events import InboundMessage as EchoWeaveEvent
+from echoweave_runtime.events import OutboundMessage as EchoWeaveReply
 
 
 class OneBotV11Adapter:

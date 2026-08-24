@@ -11,18 +11,16 @@ from echoweave_harness.audit import configure_audit, read_audit_events, record_a
 from echoweave_harness.feedback import suggest_harness_improvements, write_eval_fixtures, write_feedback_backlog
 from echoweave_harness.metrics import compute_harness_metrics
 from echoweave_harness.policy import configure_harness_policy
+from echoweave_runtime.events import InboundMessage, OutboundMessage
 from echoweave_social.access_control import AccessDecision, AccessPolicy, DEFAULT_ADMIN_ONLY_COMMANDS
 from echoweave_social.agent_runtime import SocialAgentConfig, EchoWeaveSocialAgent
-from echoweave_social.agent_schema import SocialMessage
-
-from echoweave_social.schema import EchoWeaveEvent, EchoWeaveReply
 
 
 KEEP_EXISTING_API_KEY = "__ECHOWEAVE_KEEP_EXISTING_API_KEY__"
 
 
 class AgentBackend(Protocol):
-    def handle(self, event: EchoWeaveEvent) -> EchoWeaveReply:
+    def handle(self, event: InboundMessage) -> OutboundMessage:
         """Route one normalized platform event to the agent backend."""
 
 
@@ -124,7 +122,7 @@ class EchoWeaveBackend:
             )
         )
 
-    def handle(self, event: EchoWeaveEvent) -> EchoWeaveReply:
+    def handle(self, event: InboundMessage) -> OutboundMessage:
         record_audit(
             "message",
             "inbound",
@@ -144,16 +142,7 @@ class EchoWeaveBackend:
                 metadata={"reason": decision.reason, "reason_code": decision.reason_code},
             )
             return self._access_denied_reply(event, decision)
-        reply = self._agent.handle(
-            SocialMessage(
-                platform=event.platform,
-                session_id=event.conversation_id,
-                sender_id=event.sender_id,
-                text=event.text,
-                message_id=event.message_id,
-                raw=event.raw,
-            )
-        )
+        reply = self._agent.handle(event)
         record_audit(
             "message",
             "reply",
@@ -162,11 +151,8 @@ class EchoWeaveBackend:
             actor_id=event.sender_id,
             metadata={"platform": event.platform, "reply_chars": len(reply.text)},
         )
-        return EchoWeaveReply(
-            text=reply.text,
-            platform=event.platform,
-            conversation_id=event.conversation_id,
-            target_id=event.reply_target_id or event.conversation_id,
+        return replace(
+            reply,
             metadata={
                 **reply.metadata,
                 "event_raw": event.raw,
@@ -206,7 +192,7 @@ class EchoWeaveBackend:
         conversation_id: str = "web-coding",
         sender_id: str = "web-admin",
     ) -> dict[str, object]:
-        message = SocialMessage(platform=platform, session_id=conversation_id, sender_id=sender_id, text="")
+        message = InboundMessage(platform=platform, conversation_id=conversation_id, sender_id=sender_id, text="")
         profiles = self._agent._model_profiles()
         profile_items: dict[str, dict[str, object]] = {}
         for name, profile in profiles.items():
@@ -394,9 +380,9 @@ class EchoWeaveBackend:
             "eval_out": eval_out,
         }
 
-    def _access_denied_reply(self, event: EchoWeaveEvent, decision: AccessDecision) -> EchoWeaveReply:
+    def _access_denied_reply(self, event: InboundMessage, decision: AccessDecision) -> OutboundMessage:
         text = "" if decision.silent else f"Access denied: {decision.reason}"
-        return EchoWeaveReply(
+        return OutboundMessage(
             text=text,
             platform=event.platform,
             conversation_id=event.conversation_id,

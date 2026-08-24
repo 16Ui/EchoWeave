@@ -1,33 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+"""Compatibility imports for the pre-M1 social message names.
+
+New code imports the canonical contracts from :mod:`echoweave_runtime.events`.
+"""
+
+from echoweave_runtime.events import InboundMessage, OutboundMessage
 
 
-@dataclass(frozen=True)
-class EchoWeaveEvent:
-    platform: str
-    conversation_id: str
-    sender_id: str
-    text: str
-    message_id: str | None = None
-    reply_target_id: str | None = None
-    raw: dict[str, Any] = field(default_factory=dict)
+EchoWeaveEvent = InboundMessage
+EchoWeaveReply = OutboundMessage
 
-
-@dataclass(frozen=True)
-class EchoWeaveReply:
-    text: str
-    platform: str
-    conversation_id: str
-    target_id: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "text": self.text,
-            "platform": self.platform,
-            "conversation_id": self.conversation_id,
-            "target_id": self.target_id,
-            "metadata": self.metadata,
-        }
+__all__ = ["EchoWeaveEvent", "EchoWeaveReply"]

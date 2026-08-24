@@ -3,16 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from echoweave_runtime.runtime.events import RuntimeStreamEvent, utc_now_iso
+from echoweave_runtime.events import AgentEvent
 
 
 class RuntimeObserver(Protocol):
-    def emit(self, event: RuntimeStreamEvent) -> None:
+    def emit(self, event: AgentEvent) -> None:
         ...
 
 
 class NullRuntimeObserver:
-    def emit(self, event: RuntimeStreamEvent) -> None:
+    def emit(self, event: AgentEvent) -> None:
         return
 
 
@@ -20,7 +20,7 @@ class JsonLineRuntimeObserver:
     def __init__(self, sink) -> None:
         self.sink = sink
 
-    def emit(self, event: RuntimeStreamEvent) -> None:
+    def emit(self, event: AgentEvent) -> None:
         self.sink(event.to_json())
 
 
@@ -30,10 +30,10 @@ class RuntimeEventDispatcher:
 
     def emit(self, event: str, session_id: str, payload: dict[str, object]) -> None:
         self.observer.emit(
-            RuntimeStreamEvent(
-                event=event,
-                timestamp=utc_now_iso(),
-                session_id=session_id,
+            AgentEvent(
+                type=event,
+                source="agent-runtime",
+                conversation_id=session_id,
                 payload=payload,
             )
         )

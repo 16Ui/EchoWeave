@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from echoweave_social.schema import EchoWeaveEvent
+from echoweave_runtime.events import InboundMessage
 
 
 DEFAULT_ADMIN_ONLY_COMMANDS = (
@@ -36,7 +36,7 @@ class AccessPolicy:
     bot_ids: tuple[str, ...] = ()
     admin_only_commands: tuple[str, ...] = DEFAULT_ADMIN_ONLY_COMMANDS
 
-    def check(self, event: EchoWeaveEvent) -> AccessDecision:
+    def check(self, event: InboundMessage) -> AccessDecision:
         sender = _normalize_id(event.sender_id)
         conversation_kind, conversation_id = _split_conversation(event.conversation_id)
         admins = _normalize_set(self.admins)
@@ -108,7 +108,7 @@ def _normalize_set(values: tuple[str, ...]) -> set[str]:
     return {_normalize_id(value) for value in values if _normalize_id(value)}
 
 
-def _mentions_bot(event: EchoWeaveEvent, bot_ids: tuple[str, ...]) -> bool:
+def _mentions_bot(event: InboundMessage, bot_ids: tuple[str, ...]) -> bool:
     configured_bot_ids = _normalize_set(bot_ids)
     raw = event.raw
     if _message_segments_mention_bot(raw.get("message"), configured_bot_ids):

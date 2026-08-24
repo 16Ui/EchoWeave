@@ -13,13 +13,14 @@ from echoweave_agent_core import AgentCore, AgentCoreConfig, TurnRequest
 from echoweave_ai.providers import create_ai_model_from_profile
 from echoweave_runtime.app import build_registry
 from echoweave_runtime.config import load_env
+from echoweave_runtime.events import InboundMessage as SocialMessage
+from echoweave_runtime.events import OutboundMessage as SocialReply
 from echoweave_runtime.extensions.manager import build_extension_manager
 from echoweave_runtime.extensions.skill_provider import LocalSkillProvider
 from echoweave_runtime.session.store import SessionStore
 from echoweave_runtime.tools.policy import PolicyVerdict, ShellCommandPolicy
 from echoweave_harness.audit import record_audit
 from echoweave_harness.policy import HarnessPolicy, get_harness_policy
-from echoweave_social.agent_schema import SocialMessage, SocialReply
 from echoweave_social.state import SocialStateStore
 
 
@@ -151,7 +152,7 @@ class EchoWeaveSocialAgent:
         lines = [
             "EchoWeave social status",
             f"platform: {message.platform}",
-            f"conversation: {message.session_id}",
+            f"conversation: {message.conversation_id}",
             f"workspace_mode: {self._workspace_mode(message)}",
             f"workspace: {workspace}",
             f"model_profile: {self._selected_model_profile_name(message)}",
@@ -437,7 +438,7 @@ class EchoWeaveSocialAgent:
             "status": "pending",
             "conversation_key": message.conversation_key,
             "platform": message.platform,
-            "session_id": message.session_id,
+            "session_id": message.conversation_id,
             "sender_id": message.sender_id,
             "command": command,
             "reason": reason,
@@ -840,7 +841,9 @@ class EchoWeaveSocialAgent:
     ) -> SocialReply:
         return SocialReply(
             text=text,
-            session_id=message.session_id,
+            platform=message.platform,
+            conversation_id=message.conversation_id,
+            target_id=message.reply_target_id or message.conversation_id,
             runtime_session_id=runtime_session_id,
             runtime_session_path=runtime_session_path,
             metadata=metadata or {},

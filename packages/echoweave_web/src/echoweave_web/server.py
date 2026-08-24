@@ -12,12 +12,12 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 import xml.etree.ElementTree as ET
 
+from echoweave_runtime.events import AgentEvent, EventTypes, InboundMessage
 from echoweave_runtime.lifecycle import RuntimeHost
 from echoweave_social.adapters.base import PlatformAdapter
 from echoweave_social.backend import AgentBackend
 from echoweave_social.event_bus import EventBus
 from echoweave_social.onebot_client import OneBotHttpClient
-from echoweave_social.schema import EchoWeaveEvent
 from echoweave_web.auth import AuthUser, JwtUserStore
 from echoweave_web.templates import admin_html, login_html, user_html
 
@@ -292,16 +292,7 @@ class HubWebhookServer:
                         return
                     logger.info("payload summary=%s", _payload_summary(payload))
                     event = adapter.event_from_payload(payload)
-                    event_bus.publish(
-                        "message.inbound",
-                        {
-                            "platform": event.platform,
-                            "conversation_id": event.conversation_id,
-                            "sender_id": event.sender_id,
-                            "message_id": event.message_id,
-                            "text": event.text,
-                        },
-                    )
+                    event_bus.publish(AgentEvent.from_message(event, correlation_id=event.message_id))
                     logger.info(
                         "inbound platform=%s conversation=%s sender=%s message_id=%s",
                         event.platform,
@@ -311,16 +302,7 @@ class HubWebhookServer:
                     )
                     reply = backend.handle(event)
                     outbound = adapter.payload_from_reply(reply)
-                    event_bus.publish(
-                        "message.reply",
-                        {
-                            "platform": reply.platform,
-                            "conversation_id": reply.conversation_id,
-                            "target_id": reply.target_id,
-                            "text": reply.text,
-                            "metadata": reply.metadata,
-                        },
-                    )
+                    event_bus.publish(AgentEvent.from_message(reply, correlation_id=event.message_id))
                     if onebot_client and adapter.name == "onebot-v11":
                         send_result = onebot_client.send_reply(reply)
                         outbound["active_send"] = send_result.to_dict()
@@ -340,8 +322,11 @@ class HubWebhookServer:
                 except Exception as exc:  # pragma: no cover - defensive HTTP edge
                     logger.exception("web request failed")
                     event_bus.publish(
-                        "message.error",
-                        {"error": str(exc), "type": type(exc).__name__},
+                        AgentEvent(
+                            type=EventTypes.RUN_FAILED,
+                            source="web-gateway",
+                            payload={"error": str(exc), "type": type(exc).__name__},
+                        )
                     )
                     self._write_json(500, {"ok": False, "error": str(exc)})
 
@@ -577,7 +562,7 @@ def _handle_web_command(backend: AgentBackend, event_bus: EventBus, payload: dic
     sender_id = str(payload.get("sender_id") or "").strip()
     if not sender_id or sender_id == "web-admin":
         sender_id = _first_configured_admin(backend) or "web-admin"
-    event = EchoWeaveEvent(
+    event = InboundMessage(
         platform=platform,
         conversation_id=conversation_id,
         sender_id=sender_id,
@@ -585,29 +570,9 @@ def _handle_web_command(backend: AgentBackend, event_bus: EventBus, payload: dic
         message_id=str(payload.get("message_id") or f"web-{int(time.time() * 1000)}"),
         raw={"source": "echoweave_web", "payload": payload},
     )
-    event_bus.publish(
-        "message.inbound",
-        {
-            "platform": event.platform,
-            "conversation_id": event.conversation_id,
-            "sender_id": event.sender_id,
-            "message_id": event.message_id,
-            "text": event.text,
-            "source": "web-command",
-        },
-    )
+    event_bus.publish(AgentEvent.from_message(event, correlation_id=event.message_id))
     reply = backend.handle(event)
-    event_bus.publish(
-        "message.reply",
-        {
-            "platform": reply.platform,
-            "conversation_id": reply.conversation_id,
-            "target_id": reply.target_id,
-            "text": reply.text,
-            "metadata": reply.metadata,
-            "source": "web-command",
-        },
-    )
+    event_bus.publish(AgentEvent.from_message(reply, correlation_id=event.message_id))
     return reply
 
 
