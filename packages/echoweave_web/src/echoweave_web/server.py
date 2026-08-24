@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import threading
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,6 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 import xml.etree.ElementTree as ET
 
+from echoweave_runtime.lifecycle import RuntimeHost
 from echoweave_social.adapters.base import PlatformAdapter
 from echoweave_social.backend import AgentBackend
 from echoweave_social.event_bus import EventBus
@@ -20,7 +22,50 @@ from echoweave_web.auth import AuthUser, JwtUserStore
 from echoweave_web.templates import admin_html, login_html, user_html
 
 
-__all__ = ["HubWebhookServer", "_read_chunked_body", "re_match_approval_action"]
+__all__ = ["HubWebhookServer", "HttpServerComponent", "_read_chunked_body", "re_match_approval_action"]
+
+
+class HttpServerComponent:
+    """Lifecycle adapter for the blocking standard-library HTTP server."""
+
+    name = "web-gateway"
+
+    def __init__(self, gateway: "HubWebhookServer", host: str, port: int) -> None:
+        self._gateway = gateway
+        self._host = host
+        self._port = port
+        self._server: ThreadingHTTPServer | None = None
+        self._serving_thread_id: int | None = None
+
+    @property
+    def address(self) -> tuple[str, int]:
+        if self._server is None:
+            raise RuntimeError("web gateway has not started")
+        host, port = self._server.server_address[:2]
+        return str(host), int(port)
+
+    def start(self) -> None:
+        if self._server is not None:
+            return
+        self._server = self._gateway.build_server(self._host, self._port)
+
+    def serve_forever(self) -> None:
+        if self._server is None:
+            raise RuntimeError("web gateway has not started")
+        self._serving_thread_id = threading.get_ident()
+        try:
+            self._server.serve_forever()
+        finally:
+            self._serving_thread_id = None
+
+    def stop(self) -> None:
+        server = self._server
+        if server is None:
+            return
+        if self._serving_thread_id is not None and self._serving_thread_id != threading.get_ident():
+            server.shutdown()
+        server.server_close()
+        self._server = None
 
 
 class HubWebhookServer:
@@ -511,15 +556,16 @@ class HubWebhookServer:
         return ThreadingHTTPServer((host, port), Handler)
 
     def serve(self, host: str = "127.0.0.1", port: int = 8787) -> None:
-        server = self.build_server(host, port)
-        print(f"EchoWeave web gateway listening on http://{host}:{port}")
-        print(f"adapter: {self.adapter.name}")
+        web_gateway = HttpServerComponent(self, host, port)
+        runtime = RuntimeHost().register(web_gateway)
         try:
-            server.serve_forever()
+            with runtime:
+                bound_host, bound_port = web_gateway.address
+                print(f"EchoWeave web gateway listening on http://{bound_host}:{bound_port}")
+                print(f"adapter: {self.adapter.name}")
+                web_gateway.serve_forever()
         except KeyboardInterrupt:
             print("Shutting down EchoWeave web gateway.")
-        finally:
-            server.server_close()
 
 
 def _handle_web_command(backend: AgentBackend, event_bus: EventBus, payload: dict[str, Any]) -> Any:

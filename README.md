@@ -62,6 +62,7 @@ EchoWeave
 - WeChat Official Account adapter：支持微信公众号明文 XML 回调和 `echostr` 校验。
 - Web 管理面板：配置模型、RAG、skill、管理员、沙盒、审批、harness policy。
 - SSE：提供运行事件流，便于仪表盘或调试客户端订阅。
+- Runtime Host：统一管理运行组件的启动、逆序关闭和启动失败回滚；Web Gateway 已完成接入。
 - Docker Compose：包含 EchoWeave + PostgreSQL + pgvector 的部署形态。
 
 ## 快速启动

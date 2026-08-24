@@ -13,7 +13,8 @@ EchoWeave 的主线是可扩展的个人 Agent Runtime。实习经验只用于�
 ## M1：统一事件与生命周期
 
 - 定义与渠道无关的消息、附件、工具调用和流式响应事件；
-- 明确 Runtime、Channel、Provider、Plugin 的启动与关闭顺序；
+- [已完成首个切片] 增加 Runtime Host，落实顺序启动、逆序关闭、失败回滚，并接入 Web Gateway；
+- 将 Channel、Provider、Plugin 逐步接入统一生命周期；
 - 将入口层与 Agent Loop 解耦；
 - 为异常、取消、超时和重试建立统一结果模型。
 

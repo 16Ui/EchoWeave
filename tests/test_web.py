@@ -19,6 +19,7 @@ from echoweave_harness.feedback import suggest_harness_improvements, write_feedb
 from echoweave_harness.metrics import compute_harness_metrics
 from echoweave_harness.policy import configure_harness_policy
 from echoweave_runtime.app import build_registry
+from echoweave_runtime.lifecycle import LifecycleState, RuntimeHost
 from echoweave_runtime.extensions.base import RetrievalChunk
 from echoweave_runtime.extensions.hybrid_rag_provider import HybridRagProviderConfig, HybridRagRetrievalProvider
 from echoweave_runtime.rag.pipeline import Bm25Reranker, LocalMultiQueryRewriter
@@ -36,7 +37,7 @@ from echoweave_social.agent_schema import SocialMessage
 from echoweave_social.backend import EchoWeaveBackend, EchoWeaveBackendConfig
 from echoweave_web.cli import app
 from echoweave_social.config import EchoWeaveConfig
-from echoweave_web.server import HubWebhookServer
+from echoweave_web.server import HttpServerComponent, HubWebhookServer
 from echoweave_web.server import _read_chunked_body
 from echoweave_social.onebot_client import OneBotHttpClient
 from echoweave_social.schema import EchoWeaveEvent, EchoWeaveReply
@@ -167,13 +168,16 @@ def test_webhook_health_and_token_auth() -> None:
                 target_id=event.reply_target_id or event.conversation_id,
             )
 
-    server = HubWebhookServer(
+    gateway = HubWebhookServer(
         GenericWebhookAdapter(),
         DummyBackend(),
         webhook_token="secret",
-    ).build_server("127.0.0.1", 0)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    )
+    web_component = HttpServerComponent(gateway, "127.0.0.1", 0)
+    runtime = RuntimeHost().register(web_component)
+    runtime.start()
+    port = web_component.address[1]
+    thread = threading.Thread(target=web_component.serve_forever, daemon=True)
     thread.start()
     try:
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
@@ -208,9 +212,10 @@ def test_webhook_health_and_token_auth() -> None:
         assert query_token_panel.status == 302
         assert (query_token_panel.getheader("Location") or "").startswith("/login")
     finally:
-        server.shutdown()
-        server.server_close()
+        runtime.stop()
         thread.join(timeout=5)
+        assert runtime.state is LifecycleState.STOPPED
+        assert not thread.is_alive()
 def test_webhook_admin_panel_and_approval_api() -> None:
     class DummyBackend:
         def handle(self, event: EchoWeaveEvent) -> EchoWeaveReply:
