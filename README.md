@@ -66,6 +66,7 @@ EchoWeave
 - Runtime Host：统一管理运行组件的启动、逆序关闭和启动失败回滚；Web Gateway 已完成接入。
 - AstrBot 兼容入口：安全分析插件 Manifest、配置、Skills 和 API 使用，未审查代码不会在扫描阶段执行。
 - AstrBot 基础命令桥：通过显式授权的独立 Worker 运行兼容插件，并提供生命周期、请求关联和超时终止。
+- 插件执行策略：敏感能力需声明并授权，Worker 使用隔离模式、环境白名单和有界 JSON 协议。
 - Docker Compose：包含 EchoWeave + PostgreSQL + pgvector 的部署形态。
 
 ## 快速启动

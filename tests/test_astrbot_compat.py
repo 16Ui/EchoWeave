@@ -94,6 +94,7 @@ def test_inspector_blocks_direct_core_import_and_reports_capabilities(tmp_path: 
 import os
 import socket
 from astrbot.core.star.star_manager import StarManager
+os.system("echo blocked")
 """.strip(),
         encoding="utf-8",
     )
@@ -114,6 +115,18 @@ def test_inspector_blocks_dynamic_imports(tmp_path: Path) -> None:
 
     assert report.status == "blocked"
     assert "dynamic imports are not allowed by the compatibility loader" in report.blockers
+
+
+def test_inspector_collects_capabilities_from_plugin_submodules(tmp_path: Path) -> None:
+    _write_manifest(tmp_path)
+    (tmp_path / "main.py").write_text("from tools.client import connect", encoding="utf-8")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "client.py").write_text("import socket\ndef connect(): pass", encoding="utf-8")
+
+    report = inspect_astrbot_plugin(tmp_path)
+
+    assert "network" in report.requested_capabilities
 
 
 def test_manifest_rejects_ambiguous_plugin_identity(tmp_path: Path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -14,6 +15,11 @@ from echoweave_runtime.events import InboundMessage, OutboundMessage
 from echoweave_runtime.extensions.astrbot_compat import (
     AstrBotCompatibilityReport,
     inspect_astrbot_plugin,
+)
+from echoweave_runtime.extensions.plugin_permissions import (
+    PluginPermissionDecision,
+    evaluate_plugin_permissions,
+    load_plugin_permissions,
 )
 
 
@@ -34,12 +40,26 @@ class AstrBotPluginProcess:
         *,
         allow_execution: bool = False,
         timeout_seconds: float = 10.0,
+        granted_capabilities: frozenset[str] = frozenset(),
+        plugin_environment: dict[str, str] | None = None,
+        max_request_bytes: int = 1_048_576,
+        max_response_bytes: int = 1_048_576,
     ) -> None:
         self.plugin_root = Path(plugin_root).expanduser().resolve()
         self.report: AstrBotCompatibilityReport = inspect_astrbot_plugin(self.plugin_root)
         self.allow_execution = allow_execution
         self.timeout_seconds = max(0.1, float(timeout_seconds))
         self.startup_timeout_seconds = max(3.0, self.timeout_seconds)
+        self.permission_manifest = load_plugin_permissions(self.plugin_root)
+        self.permission_decision: PluginPermissionDecision = evaluate_plugin_permissions(
+            self.report.requested_capabilities,
+            self.permission_manifest.capabilities,
+            granted_capabilities,
+        )
+        self.granted_capabilities = frozenset(granted_capabilities)
+        self.plugin_environment = dict(plugin_environment or {})
+        self.max_request_bytes = _validated_protocol_limit("max_request_bytes", max_request_bytes)
+        self.max_response_bytes = _validated_protocol_limit("max_response_bytes", max_response_bytes)
         self._process: subprocess.Popen[str] | None = None
         self._responses: queue.Queue[dict[str, Any]] = queue.Queue()
         self._stderr_lines: deque[str] = deque(maxlen=200)
@@ -65,11 +85,16 @@ class AstrBotPluginProcess:
             raise AstrBotPluginError("AstrBot plugin execution requires explicit allow_execution=True")
         if self.report.blockers:
             raise AstrBotPluginError("AstrBot plugin is blocked: " + "; ".join(self.report.blockers))
+        if not self.permission_decision.allowed:
+            raise AstrBotPluginError("AstrBot plugin permission denied: " + "; ".join(self.permission_decision.reasons))
+        if self.plugin_environment and "environment" not in self.granted_capabilities:
+            raise AstrBotPluginError("plugin_environment requires the environment capability")
 
-        runtime_source_root = Path(__file__).resolve().parents[2]
+        worker_path = Path(__file__).resolve().with_name("astrbot_worker.py")
         self._process = subprocess.Popen(
-            [sys.executable, "-m", "echoweave_runtime.extensions.astrbot_worker", str(self.plugin_root)],
-            cwd=runtime_source_root,
+            [sys.executable, "-I", str(worker_path), str(self.plugin_root), str(self.max_response_bytes)],
+            cwd=self.plugin_root,
+            env=self._worker_environment(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -152,8 +177,11 @@ class AstrBotPluginProcess:
                 raise AstrBotPluginError("AstrBot plugin worker is not running")
             request_id = uuid4().hex
             request = {"id": request_id, "operation": operation, **payload}
+            encoded_request = json.dumps(request, ensure_ascii=True) + "\n"
+            if len(encoded_request.encode("ascii")) > self.max_request_bytes:
+                raise AstrBotPluginError(f"AstrBot plugin request exceeds {self.max_request_bytes} bytes")
             try:
-                process.stdin.write(json.dumps(request, ensure_ascii=True) + "\n")
+                process.stdin.write(encoded_request)
                 process.stdin.flush()
                 response = self._responses.get(timeout=self.timeout_seconds)
             except (BrokenPipeError, OSError, queue.Empty) as exc:
@@ -169,6 +197,9 @@ class AstrBotPluginProcess:
 
     def _read_stdout(self, stream: Any) -> None:
         for line in stream:
+            if len(line.encode("utf-8")) > self.max_response_bytes:
+                self._responses.put({"type": "error", "error": "AstrBot worker response exceeded protocol limit"})
+                continue
             try:
                 value = json.loads(line)
             except json.JSONDecodeError:
@@ -193,6 +224,22 @@ class AstrBotPluginProcess:
                 process.kill()
                 process.wait(timeout=2)
         self._process = None
+
+    def _worker_environment(self) -> dict[str, str]:
+        safe_names = {"LANG", "LC_ALL", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "WINDIR"}
+        if "host-process" in self.granted_capabilities:
+            safe_names.update({"COMSPEC", "PATH", "PATHEXT"})
+        environment = {name: value for name, value in os.environ.items() if name.upper() in safe_names}
+        if "environment" in self.granted_capabilities:
+            environment.update(self.plugin_environment)
+        return environment
+
+
+def _validated_protocol_limit(name: str, value: int) -> int:
+    normalized = int(value)
+    if not 1024 <= normalized <= 16 * 1024 * 1024:
+        raise ValueError(f"{name} must be between 1024 and 16777216 bytes")
+    return normalized
 
 
 __all__ = ["AstrBotPluginError", "AstrBotPluginProcess"]

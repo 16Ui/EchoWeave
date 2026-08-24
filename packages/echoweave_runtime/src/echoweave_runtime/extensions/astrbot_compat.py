@@ -32,11 +32,15 @@ _HOOK_DECORATORS = {
 }
 _SENSITIVE_IMPORTS = {
     "ctypes": "native-code",
-    "os": "host-process",
     "shutil": "filesystem-write",
     "socket": "network",
     "subprocess": "host-process",
+    "aiohttp": "network",
+    "httpx": "network",
+    "requests": "network",
 }
+_FILESYSTEM_WRITE_CALLS = {"mkdir", "rename", "rmdir", "unlink", "write_bytes", "write_text"}
+_HOST_PROCESS_CALLS = {"execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe", "popen", "spawnl", "spawnv", "system"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,18 +116,23 @@ def inspect_astrbot_plugin(plugin_root: str | Path) -> AstrBotCompatibilityRepor
     if not main_path.is_file():
         blockers.append("missing required main.py entrypoint")
     else:
-        try:
-            tree = ast.parse(main_path.read_text(encoding="utf-8"), filename=str(main_path))
-        except (OSError, UnicodeError, SyntaxError) as exc:
-            blockers.append(f"main.py cannot be statically parsed: {exc}")
-        else:
-            analysis = _AstrBotSourceAnalysis()
+        source_files = _plugin_python_files(root)
+        if main_path not in source_files:
+            source_files = (main_path, *source_files)
+        analysis = _AstrBotSourceAnalysis()
+        for source_path in source_files:
+            relative_path = source_path.relative_to(root).as_posix()
+            try:
+                tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+            except (OSError, UnicodeError, SyntaxError) as exc:
+                blockers.append(f"{relative_path} cannot be statically parsed: {exc}")
+                continue
             analysis.visit(tree)
-            decorators.update(analysis.decorators)
-            astrbot_imports.update(analysis.astrbot_imports)
-            requested_capabilities.update(analysis.requested_capabilities)
-            lifecycle_methods.update(analysis.lifecycle_methods)
-            blockers.extend(analysis.blockers)
+        decorators.update(analysis.decorators)
+        astrbot_imports.update(analysis.astrbot_imports)
+        requested_capabilities.update(analysis.requested_capabilities)
+        lifecycle_methods.update(analysis.lifecycle_methods)
+        blockers.extend(analysis.blockers)
 
     unsupported_decorators = decorators - _BASIC_DECORATORS - _HOOK_DECORATORS
     if unsupported_decorators:
@@ -232,6 +241,20 @@ class _AstrBotSourceAnalysis(ast.NodeVisitor):
         name = _qualified_name(node.func)
         if name in {"__import__", "importlib.import_module"}:
             self.blockers.append("dynamic imports are not allowed by the compatibility loader")
+        leaf = name.rsplit(".", 1)[-1]
+        if leaf in _FILESYSTEM_WRITE_CALLS:
+            self.requested_capabilities.add("filesystem-write")
+        if name.startswith("os.") and leaf in _HOST_PROCESS_CALLS:
+            self.requested_capabilities.add("host-process")
+        if name in {"os.getenv"}:
+            self.requested_capabilities.add("environment")
+        if name == "open" and _open_call_may_write(node):
+            self.requested_capabilities.add("filesystem-write")
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
+        if _qualified_name(node) == "os.environ":
+            self.requested_capabilities.add("environment")
         self.generic_visit(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
@@ -279,6 +302,16 @@ def _qualified_name(node: ast.AST) -> str:
     return ""
 
 
+def _open_call_may_write(node: ast.Call) -> bool:
+    mode: ast.AST | None = node.args[1] if len(node.args) > 1 else None
+    for keyword in node.keywords:
+        if keyword.arg == "mode":
+            mode = keyword.value
+    if isinstance(mode, ast.Constant) and isinstance(mode.value, str):
+        return any(flag in mode.value for flag in "wax+")
+    return False
+
+
 def _discover_bundled_skills(root: Path) -> tuple[Path, ...]:
     skills_root = root / "skills"
     if not skills_root.is_dir():
@@ -287,6 +320,20 @@ def _discover_bundled_skills(root: Path) -> tuple[Path, ...]:
     if direct.is_file():
         return (direct.resolve(),)
     return tuple(sorted(path.resolve() for path in skills_root.glob("*/SKILL.md") if path.is_file()))
+
+
+def _plugin_python_files(root: Path) -> tuple[Path, ...]:
+    excluded_directories = {".git", ".tox", ".venv", "__pycache__", "node_modules", "venv"}
+    files: list[Path] = []
+    for path in root.rglob("*.py"):
+        relative = path.relative_to(root)
+        if any(part in excluded_directories for part in relative.parts):
+            continue
+        resolved = path.resolve()
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            continue
+        files.append(resolved)
+    return tuple(sorted(files))
 
 
 def _required_identity(value: dict[str, Any], key: str) -> str:

@@ -86,11 +86,39 @@ ASCII JSON 转义跨越 Windows 代码页；请求超时会终止 Worker。
 独立进程是故障边界，不是安全沙箱。插件仍继承当前用户的文件和网络权限，所以未经信任的插件不能仅凭
 静态检查结果执行。下一阶段需要权限清单和受限进程环境。
 
+## 权限与受限进程
+
+插件通过根目录下的 `echoweave.permissions.json` 声明敏感能力：
+
+```json
+{
+  "schema_version": 1,
+  "capabilities": ["network", "filesystem-write"]
+}
+```
+
+当前能力包括 `network`、`filesystem-write`、`host-process`、`native-code` 和 `environment`。启动需要
+同时满足：静态分析发现的能力已在插件 Manifest 声明，并且用户通过 `granted_capabilities` 明确授权。
+声明不等于授权，授权也不能替代插件声明。
+
+能力分析覆盖插件目录内全部 Python 源文件，而不只检查 `main.py`；`.git`、虚拟环境、缓存和
+`node_modules` 等非插件源码目录会被排除，符号链接也不能逃出插件根目录。
+
+Worker 使用 Python isolated mode (`-I`) 启动，工作目录固定为插件根目录。宿主环境只传递启动所需的
+系统和临时目录变量；API Key、Token 和其他业务环境变量默认不继承。插件确需环境配置时，必须声明并
+获批 `environment`，且只能收到调用者通过 `plugin_environment` 显式传入的键值。
+
+JSON 协议对请求和响应分别设置大小上限，防止插件用异常大的消息占满通道；单次执行超时仍会终止整个
+Worker，避免超时任务继续在后台运行。
+
+这些控制属于应用层策略和最小权限启动，并不能拦截插件绕过静态分析后直接调用操作系统 API。完整执行
+不可信插件仍需要 Windows AppContainer、容器或独立低权限账户等 OS 级边界。
+
 ## 推荐实现顺序
 
-1. 增加插件权限清单和受限进程环境；
-2. 映射消息组件以及 `event.send()` 的主动发送语义；
-3. 映射 LLM/Tool Hooks，保持 EchoWeave Hook 的结构化结果；
+1. 映射消息组件以及 `event.send()` 的主动发送语义；
+2. 映射 LLM/Tool Hooks，保持 EchoWeave Hook 的结构化结果；
+3. 接入可选 OS 级沙箱后，再允许来源不完全可信的插件；
 4. 通过更多真实开源插件样本建立兼容回归集，再扩大 API 面；
 5. 最后评估 Plugin Pages 和 Web API，不让插件直接共享管理端权限。
 

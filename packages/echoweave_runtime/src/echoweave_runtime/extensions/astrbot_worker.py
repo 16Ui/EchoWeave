@@ -11,7 +11,10 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from echoweave_runtime.extensions.astrbot_sdk import (
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from echoweave_runtime.extensions.astrbot_sdk import (  # noqa: E402
     AstrMessageEvent,
     Context,
     MessageEventResult,
@@ -20,6 +23,9 @@ from echoweave_runtime.extensions.astrbot_sdk import (
     filter,
     register,
 )
+
+
+_MAX_RESPONSE_BYTES = 1_048_576
 
 
 class AstrBotWorkerRuntime:
@@ -205,11 +211,24 @@ async def _serve(plugin_root: Path, protocol_output: Any) -> None:
 def _write(output: Any, value: dict[str, Any]) -> None:
     # Keep the wire format ASCII-only so Windows pipe code pages cannot corrupt
     # protocol frames containing plugin-generated Unicode text.
-    output.write(json.dumps(value, ensure_ascii=True) + "\n")
+    encoded = json.dumps(value, ensure_ascii=True) + "\n"
+    if len(encoded.encode("ascii")) > _MAX_RESPONSE_BYTES:
+        encoded = json.dumps(
+            {
+                "type": "error",
+                "id": value.get("id"),
+                "error": f"AstrBot plugin response exceeds {_MAX_RESPONSE_BYTES} bytes",
+                "error_type": "ResponseTooLarge",
+            }
+        ) + "\n"
+    output.write(encoded)
     output.flush()
 
 
 def main() -> None:
+    global _MAX_RESPONSE_BYTES
+    if len(sys.argv) > 2:
+        _MAX_RESPONSE_BYTES = int(sys.argv[2])
     protocol_output = sys.stdout
     sys.stdout = sys.stderr
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)

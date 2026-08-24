@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
@@ -33,6 +34,13 @@ def _message(text: str) -> InboundMessage:
         text=text,
         message_id="m-1",
         raw={"sender_name": "Echo User", "message": [{"type": "text", "data": {"text": text}}]},
+    )
+
+
+def _write_permissions(root: Path, *capabilities: str) -> None:
+    (root / "echoweave.permissions.json").write_text(
+        json.dumps({"schema_version": 1, "capabilities": list(capabilities)}),
+        encoding="utf-8",
     )
 
 
@@ -69,7 +77,12 @@ class Plugin(Star):
         Path(__file__).with_name("terminated.txt").write_text("yes", encoding="utf-8")
 """,
     )
-    component = AstrBotPluginProcess(root, allow_execution=True)
+    _write_permissions(root, "filesystem-write")
+    component = AstrBotPluginProcess(
+        root,
+        allow_execution=True,
+        granted_capabilities=frozenset({"filesystem-write"}),
+    )
     host = RuntimeHost().register(component)
 
     host.start()
@@ -153,3 +166,78 @@ class Plugin(Star):
         component.dispatch(_message("/hang"))
 
     assert component.running is False
+
+
+def test_sensitive_capability_requires_declaration_and_runtime_grant(tmp_path: Path) -> None:
+    root = tmp_path / "plugin"
+    _write_plugin(
+        root,
+        """
+import socket
+from astrbot.api.star import Star
+class Plugin(Star):
+    pass
+""",
+    )
+
+    undeclared = AstrBotPluginProcess(root, allow_execution=True, granted_capabilities=frozenset({"network"}))
+    with pytest.raises(AstrBotPluginError, match="not declared"):
+        undeclared.start()
+
+    _write_permissions(root, "network")
+    ungranted = AstrBotPluginProcess(root, allow_execution=True)
+    with pytest.raises(AstrBotPluginError, match="not granted"):
+        ungranted.start()
+
+
+def test_worker_receives_only_explicit_plugin_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "plugin"
+    _write_plugin(
+        root,
+        """
+import os
+from astrbot.api.event import filter
+from astrbot.api.star import Star
+
+class Plugin(Star):
+    @filter.command("env")
+    async def env(self, event):
+        yield event.plain_result(os.getenv("ECHOWEAVE_TEST_SECRET", "missing"))
+""",
+    )
+    _write_permissions(root, "environment")
+    monkeypatch.setenv("ECHOWEAVE_TEST_SECRET", "must-not-leak")
+    component = AstrBotPluginProcess(
+        root,
+        allow_execution=True,
+        granted_capabilities=frozenset({"environment"}),
+        plugin_environment={"PLUGIN_MODE": "test"},
+    )
+    component.start()
+    try:
+        assert component.dispatch(_message("/env"))[0].text == "missing"
+    finally:
+        component.stop()
+
+
+def test_worker_rejects_response_over_protocol_limit(tmp_path: Path) -> None:
+    root = tmp_path / "plugin"
+    _write_plugin(
+        root,
+        """
+from astrbot.api.event import filter
+from astrbot.api.star import Star
+
+class Plugin(Star):
+    @filter.command("large")
+    async def large(self, event):
+        yield event.plain_result("x" * 4096)
+""",
+    )
+    component = AstrBotPluginProcess(root, allow_execution=True, max_response_bytes=1024)
+    component.start()
+    try:
+        with pytest.raises(AstrBotPluginError, match="response exceeds"):
+            component.dispatch(_message("/large"))
+    finally:
+        component.stop()
