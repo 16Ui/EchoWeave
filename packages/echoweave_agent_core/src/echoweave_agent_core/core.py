@@ -19,7 +19,7 @@ from echoweave_agent_core.sessions import (
     list_session_items,
     resolve_session_path,
 )
-from echoweave_agent_core.types import AgentCoreConfig, TurnRequest, TurnResult
+from echoweave_agent_core.types import AgentCoreConfig, RecoverTurnRequest, TurnRequest, TurnResult
 from echoweave_runtime.app import build_runtime
 from echoweave_runtime.governance import record_runtime_audit
 from echoweave_runtime.runtime.agent_session import AgentSessionRuntime
@@ -69,15 +69,137 @@ class AgentCore:
         """Execute a durable turn and describe success or failure without raising."""
         return self._execute_turn(request, create_checkpoint=True)
 
-    def _execute_turn(self, request: TurnRequest, *, create_checkpoint: bool) -> TurnOutcome:
-        turn_id = str(uuid4())
+    def recover_turn(self, request: RecoverTurnRequest) -> TurnOutcome:
+        """Start a controlled attempt from an existing recoverable checkpoint."""
+        session_path = self.session_store.resolve_session_path(request.session_path)
+        events = self.session_store.read_events(session_path)
+        checkpoint = next(
+            (
+                item
+                for item in self.session_store.list_checkpoints(session_path)
+                if str(item.get("id")) == request.checkpoint_id
+            ),
+            None,
+        )
+        if checkpoint is None:
+            raise ValueError(f"checkpoint not found: {request.checkpoint_id}")
+        turn_id = str(checkpoint.get("turn_id") or "").strip()
+        if not turn_id:
+            raise ValueError("checkpoint is not attached to a recoverable turn")
+
+        turn_states = [
+            event.payload
+            for event in events
+            if event.type == "turn.state_changed" and event.payload.get("turn_id") == turn_id
+        ]
+        if not turn_states:
+            raise ValueError(f"turn state not found for checkpoint: {request.checkpoint_id}")
+        if any(state.get("state") == TurnState.COMPLETED.value for state in turn_states):
+            raise ValueError("completed turns cannot be recovered")
+        latest_state = str(turn_states[-1].get("state") or "")
+        incomplete_states = {
+            TurnState.CREATED.value,
+            TurnState.RUNNING.value,
+            TurnState.WAITING_FOR_TOOL.value,
+            TurnState.SUSPENDED.value,
+        }
+        if latest_state in incomplete_states and not request.allow_incomplete:
+            raise ValueError(
+                f"turn is {latest_state}; set allow_incomplete=true only after confirming no active executor remains"
+            )
+        if latest_state not in incomplete_states | {
+            TurnState.FAILED.value,
+            TurnState.TIMED_OUT.value,
+            TurnState.CANCELLED.value,
+        }:
+            raise ValueError(f"turn state is not recoverable: {latest_state or 'unknown'}")
+
+        checkpoint_index = int(checkpoint.get("event_index", -1))
+        snapshot = self.session_store.load_snapshot_at(session_path, checkpoint_index)
+        prompt = self._recover_turn_prompt(events, checkpoint_index, turn_id)
+        attempt = max(int(state.get("attempt") or 1) for state in turn_states) + 1
         trace_id = str(uuid4())
+        recovery_metadata = {
+            **request.metadata,
+            "recovery": True,
+            "recovery_attempt": attempt,
+            "recovery_checkpoint_id": request.checkpoint_id,
+            "recovered_from_state": latest_state,
+        }
+        self.session_store.append(
+            session_path,
+            "turn.recovery_started",
+            {
+                "turn_id": turn_id,
+                "trace_id": trace_id,
+                "attempt": attempt,
+                "checkpoint_id": request.checkpoint_id,
+                "from_state": latest_state,
+            },
+        )
+        self.session_store.append(
+            session_path,
+            "history_reset",
+            {
+                "history": snapshot.history,
+                "summary": snapshot.summary,
+                "turn_id": turn_id,
+                "trace_id": trace_id,
+                "checkpoint_id": request.checkpoint_id,
+                "reason": "controlled_turn_recovery",
+            },
+        )
+        outcome = self._execute_turn(
+            TurnRequest(
+                prompt=prompt,
+                session_path=session_path,
+                resume=True,
+                history=snapshot.history,
+                summary=snapshot.summary,
+                metadata=recovery_metadata,
+            ),
+            create_checkpoint=False,
+            turn_id=turn_id,
+            trace_id=trace_id,
+            recovery_checkpoint=checkpoint,
+            attempt=attempt,
+            run_before_hooks=False,
+            stop_on_blocked_tool=True,
+        )
+        self.session_store.append(
+            session_path,
+            "turn.recovery_finished",
+            {
+                "turn_id": turn_id,
+                "trace_id": trace_id,
+                "attempt": attempt,
+                "checkpoint_id": request.checkpoint_id,
+                "state": outcome.state.value,
+                "failure": outcome.failure.to_dict() if outcome.failure else None,
+            },
+        )
+        return outcome
+
+    def _execute_turn(
+        self,
+        request: TurnRequest,
+        *,
+        create_checkpoint: bool,
+        turn_id: str | None = None,
+        trace_id: str | None = None,
+        recovery_checkpoint: dict[str, Any] | None = None,
+        attempt: int = 1,
+        run_before_hooks: bool = True,
+        stop_on_blocked_tool: bool = False,
+    ) -> TurnOutcome:
+        turn_id = turn_id or str(uuid4())
+        trace_id = trace_id or str(uuid4())
         started_at = _utc_now_iso()
         started = time.perf_counter()
         machine = TurnStateMachine()
         session_path: Path | None = None
         session_id: str | None = None
-        checkpoint: dict[str, Any] | None = None
+        checkpoint: dict[str, Any] | None = recovery_checkpoint
         metadata = {**self.metadata, **request.metadata}
         context: CoreTurnContext | None = None
         stage = "session"
@@ -94,10 +216,12 @@ class AgentCore:
                 previous=None,
                 current=TurnState.CREATED,
                 sequence=0,
+                attempt=attempt,
             )
 
             stage = "before_hook"
-            request = self._run_before_turn_hooks(context, request)
+            if run_before_hooks:
+                request = self._run_before_turn_hooks(context, request)
             history = request.history if request.history is not None else snapshot.history
             summary = request.summary if request.summary is not None else snapshot.summary
             previous, current = machine.state, TurnState.RUNNING
@@ -109,6 +233,7 @@ class AgentCore:
                 previous=previous,
                 current=current,
                 sequence=1,
+                attempt=attempt,
             )
             machine.transition(TurnState.RUNNING)
             record_runtime_audit(
@@ -123,6 +248,8 @@ class AgentCore:
                     "prompt_chars": len(request.prompt),
                     "resume": request.resume,
                     "recoverable": create_checkpoint,
+                    "attempt": attempt,
+                    "recovery": recovery_checkpoint is not None,
                     **_audit_metadata(metadata),
                 },
             )
@@ -143,6 +270,7 @@ class AgentCore:
                 summary,
                 turn_id=turn_id,
                 trace_id=trace_id,
+                stop_on_blocked_tool=stop_on_blocked_tool,
             )
 
             result = TurnResult(
@@ -156,6 +284,7 @@ class AgentCore:
                     "turn_id": turn_id,
                     "trace_id": trace_id,
                     "checkpoint_id": checkpoint.get("id") if checkpoint else None,
+                    "attempt": attempt,
                 },
             )
             stage = "after_hook"
@@ -169,6 +298,7 @@ class AgentCore:
                 previous=previous,
                 current=current,
                 sequence=2,
+                attempt=attempt,
                 checkpoint_id=checkpoint.get("id") if checkpoint else None,
             )
             machine.transition(TurnState.COMPLETED)
@@ -184,6 +314,7 @@ class AgentCore:
                     "turn_id": turn_id,
                     "trace_id": trace_id,
                     "reply_chars": len(text or ""),
+                    "attempt": attempt,
                     **_audit_metadata(metadata),
                 },
             )
@@ -207,6 +338,8 @@ class AgentCore:
                 if failure.kind.value == "timeout"
                 else TurnState.CANCELLED
                 if failure.kind.value == "cancelled"
+                else TurnState.SUSPENDED
+                if failure.kind.value == "indeterminate_tool"
                 else TurnState.FAILED
             )
             if context is not None and isinstance(exc, Exception):
@@ -228,6 +361,7 @@ class AgentCore:
                             previous=previous,
                             current=current,
                             sequence=1 if previous is TurnState.CREATED else 2,
+                            attempt=attempt,
                             checkpoint_id=checkpoint.get("id") if checkpoint else None,
                             failure=failure.to_dict(),
                         )
@@ -251,6 +385,7 @@ class AgentCore:
                     "reason": str(exc),
                     "failure_kind": failure.kind.value,
                     "failure_stage": failure.stage,
+                    "attempt": attempt,
                     **_audit_metadata(metadata),
                 },
             )
@@ -375,6 +510,7 @@ class AgentCore:
         previous: TurnState | None,
         current: TurnState,
         sequence: int,
+        attempt: int = 1,
         checkpoint_id: str | None = None,
         failure: dict[str, Any] | None = None,
     ) -> None:
@@ -384,12 +520,29 @@ class AgentCore:
             "from": previous.value if previous else None,
             "state": current.value,
             "sequence": sequence,
+            "attempt": attempt,
         }
         if checkpoint_id is not None:
             payload["checkpoint_id"] = checkpoint_id
         if failure is not None:
             payload["failure"] = failure
         self.session_store.append(session_path, "turn.state_changed", payload)
+
+    @staticmethod
+    def _recover_turn_prompt(events: list[Any], checkpoint_index: int, turn_id: str) -> str:
+        for event in events[checkpoint_index + 1 :]:
+            if event.type == "turn.state_changed" and event.payload.get("turn_id") == turn_id:
+                state = str(event.payload.get("state") or "")
+                if state in {TurnState.COMPLETED.value}:
+                    break
+            if event.type != "message":
+                continue
+            if event.payload.get("role") != "user":
+                continue
+            content = event.payload.get("content")
+            if isinstance(content, str) and content:
+                return content
+        raise ValueError("recoverable turn prompt was not found after checkpoint")
 
 
 def _audit_metadata(metadata: dict[str, Any]) -> dict[str, Any]:

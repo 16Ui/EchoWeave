@@ -636,6 +636,7 @@ class AgentSessionRuntime:
         batch_id: str,
         batch_size: int,
         batch_index: int,
+        stop_on_blocked_tool: bool = False,
     ) -> dict[str, Any]:
         if tool_name not in _STREAMING_EAGER_SAFE_TOOLS:
             return {"status": "deferred", "reason": "tool is not safe for eager streaming execution"}
@@ -717,6 +718,8 @@ class AgentSessionRuntime:
                 tool=tool,
             )
         except Exception as exc:
+            if stop_on_blocked_tool and isinstance(exc, ToolInvocationBlockedError):
+                raise
             error = sanitize_value(f"{type(exc).__name__}: {exc}")
             self.session_store.append(
                 session_path,
@@ -1110,6 +1113,7 @@ class AgentSessionRuntime:
         *,
         turn_id: str | None = None,
         trace_id: str | None = None,
+        stop_on_blocked_tool: bool = False,
     ) -> tuple[str, list[dict[str, Any]], str | None]:
         """
         执行单轮对话主链。
@@ -1654,6 +1658,7 @@ class AgentSessionRuntime:
                                 batch_id=streaming_batch_id,
                                 batch_size=0,
                                 batch_index=len(streamed_tool_calls),
+                                stop_on_blocked_tool=stop_on_blocked_tool,
                             )
                     elif event_type == "message_error":
                         raise RuntimeError(str(payload.get("error", "model stream failed")))
@@ -1793,6 +1798,11 @@ class AgentSessionRuntime:
                             tool=tool,
                         )
                     except Exception as exc:
+                        if stop_on_blocked_tool and isinstance(exc, ToolInvocationBlockedError):
+                            return {
+                                "status": "blocked",
+                                "error": sanitize_value(f"{type(exc).__name__}: {exc}"),
+                            }
                         return {
                             "status": "error",
                             "error": sanitize_value(f"{type(exc).__name__}: {exc}"),
@@ -1807,6 +1817,9 @@ class AgentSessionRuntime:
                     tool_name = str(entry["tool_name"])
                     tool_input = sanitize_value(entry["tool_input"])
                     tool_index = int(entry["tool_index"])
+
+                    if stop_on_blocked_tool and execution_outcome.get("status") == "blocked":
+                        raise ToolInvocationBlockedError(str(execution_outcome.get("error", "tool invocation blocked")))
 
                     if execution_outcome.get("status") == "error":
                         error_message = sanitize_value(str(execution_outcome.get("error", "unknown tool error")))
@@ -2320,6 +2333,8 @@ class AgentSessionRuntime:
                         tool=tool,
                     )
                 except Exception as exc:
+                    if stop_on_blocked_tool and isinstance(exc, ToolInvocationBlockedError):
+                        raise
                     # 工具失败时统一写 tool_error，并把错误包装成 tool_result 回给模型继续推理。
                     error_message = sanitize_value(f"{type(exc).__name__}: {exc}")
                     fallback_outcome = {"status": "error", "error": error_message}

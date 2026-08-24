@@ -18,6 +18,7 @@ from echoweave_agent_core import (
     AgentCoreHookBase,
     CoreTurnContext,
     InvalidTurnTransition,
+    RecoverTurnRequest,
     SessionRuntimeFacade,
     TurnFailureKind,
     TurnRequest,
@@ -37,7 +38,10 @@ from echoweave_runtime.rag.pipeline import Bm25Reranker, LocalMultiQueryRewriter
 from echoweave_runtime.rag.model import RagSearchOptions
 from echoweave_runtime.rag.pgvector_hybrid import PgVectorHybridConfig, PgVectorHybridRagModel, collect_chunks
 from echoweave_runtime.models.demo import AgentResponse, SequenceModelClient, tool_response
+from echoweave_runtime.models.base import ModelClient
 from echoweave_runtime.session.store import SessionStore
+from echoweave_runtime.tools_base import ToolRegistry
+from echoweave_runtime.types import ToolCall
 from echoweave_social.adapters.astrbot_event import AstrBotEventAdapter
 from echoweave_social.adapters.feishu import FeishuAdapter
 from echoweave_social.adapters.generic_webhook import GenericWebhookAdapter
@@ -242,3 +246,161 @@ def test_execute_turn_stops_before_model_when_checkpoint_creation_fails() -> Non
         assert outcome.failure.kind is TurnFailureKind.CHECKPOINT
         assert outcome.failure.retryable is True
         assert model._index == 0
+
+
+class _RecoveringModel(ModelClient):
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.index = 0
+
+    def generate(self, messages, tools, options=None):
+        response = self.responses[self.index]
+        self.index += 1
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+class _RecoverableCountingTool:
+    name = "recoverable_count"
+    effect = "non_idempotent"
+    description = "Count durable execution attempts"
+    input_schema = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, arguments):
+        self.calls += 1
+        return f"executed={self.calls};value={arguments['value']}"
+
+
+def test_recover_turn_reuses_completed_tool_result_with_same_turn_identity() -> None:
+    with _local_tmp() as tmp_path:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        store = SessionStore(workspace / "sessions")
+        tool = _RecoverableCountingTool()
+        registry = ToolRegistry()
+        registry.register(tool)
+        call = AgentResponse(
+            tool_calls=[ToolCall(id="durable-call", name=tool.name, input={"value": "A"})]
+        )
+        first_core = AgentCore.from_config(
+            AgentCoreConfig(
+                model_client=_RecoveringModel([call, TimeoutError("model timed out after tool")]),
+                tool_registry=registry,
+                session_store=store,
+            )
+        )
+
+        failed = first_core.execute_turn(TurnRequest(prompt="perform durable work", resume=False))
+        assert failed.state is TurnState.TIMED_OUT
+        assert failed.checkpoint is not None
+        assert tool.calls == 1
+
+        recovered_core = AgentCore.from_config(
+            AgentCoreConfig(
+                model_client=_RecoveringModel([call, AgentResponse(text="recovered")]),
+                tool_registry=registry,
+                session_store=store,
+            )
+        )
+        recovered = recovered_core.recover_turn(
+            RecoverTurnRequest(
+                session_path=failed.session_path,
+                checkpoint_id=str(failed.checkpoint["id"]),
+            )
+        )
+
+        assert recovered.succeeded is True
+        assert recovered.turn_id == failed.turn_id
+        assert recovered.require_result().text == "recovered"
+        assert recovered.result.metadata["attempt"] == 2
+        assert tool.calls == 1
+        events = store.read_events(failed.session_path)
+        assert sum(event.type == "tool.invocation_reused" for event in events) == 1
+        assert [
+            event.payload["state"]
+            for event in events
+            if event.type == "turn.state_changed" and event.payload.get("attempt") == 2
+        ] == ["created", "running", "completed"]
+        visible = store.load_snapshot(failed.session_path)
+        prompts = [
+            item
+            for item in visible.history
+            if item.get("role") == "user" and item.get("content") == "perform durable work"
+        ]
+        assert len(prompts) == 1
+        with pytest.raises(ValueError, match="completed turns cannot be recovered"):
+            recovered_core.recover_turn(
+                RecoverTurnRequest(
+                    session_path=failed.session_path,
+                    checkpoint_id=str(failed.checkpoint["id"]),
+                )
+            )
+
+
+def test_recover_turn_suspends_when_non_idempotent_completion_is_indeterminate() -> None:
+    class FailCompletionOnceStore(SessionStore):
+        def __init__(self, sessions_dir):
+            super().__init__(sessions_dir)
+            self.failed = False
+
+        def append(self, session_path, event_type, payload):
+            if event_type == "tool.invocation_completed" and not self.failed:
+                self.failed = True
+                raise OSError("completion ledger write failed")
+            return super().append(session_path, event_type, payload)
+
+    with _local_tmp() as tmp_path:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        store = FailCompletionOnceStore(workspace / "sessions")
+        tool = _RecoverableCountingTool()
+        registry = ToolRegistry()
+        registry.register(tool)
+        call = AgentResponse(
+            tool_calls=[ToolCall(id="uncertain-call", name=tool.name, input={"value": "B"})]
+        )
+        first_core = AgentCore.from_config(
+            AgentCoreConfig(
+                model_client=_RecoveringModel([call, TimeoutError("stop failed attempt")]),
+                tool_registry=registry,
+                session_store=store,
+            )
+        )
+
+        failed = first_core.execute_turn(TurnRequest(prompt="perform uncertain work", resume=False))
+        assert failed.state is TurnState.TIMED_OUT
+        assert failed.checkpoint is not None
+        assert tool.calls == 1
+
+        recovered_core = AgentCore.from_config(
+            AgentCoreConfig(
+                model_client=_RecoveringModel([call, AgentResponse(text="must not reach")]),
+                tool_registry=registry,
+                session_store=store,
+            )
+        )
+        recovered = recovered_core.recover_turn(
+            RecoverTurnRequest(
+                session_path=failed.session_path,
+                checkpoint_id=str(failed.checkpoint["id"]),
+            )
+        )
+
+        assert recovered.state is TurnState.SUSPENDED
+        assert recovered.failure is not None
+        assert recovered.failure.kind is TurnFailureKind.INDETERMINATE_TOOL
+        assert recovered.failure.retryable is False
+        assert tool.calls == 1
+        finished = [
+            event for event in store.read_events(failed.session_path) if event.type == "turn.recovery_finished"
+        ]
+        assert finished[-1].payload["state"] == "suspended"

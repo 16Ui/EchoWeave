@@ -22,7 +22,7 @@ from echoweave_agent_core.sessions import (
     resolve_session_path,
     summarize_tool_execution,
 )
-from echoweave_agent_core.types import AgentCoreConfig, TurnRequest, TurnResult
+from echoweave_agent_core.types import AgentCoreConfig, RecoverTurnRequest, TurnRequest, TurnResult
 from echoweave_runtime.app import build_runtime  # 兼容旧导入
 from echoweave_runtime.runtime.agent_session import AgentSessionRuntime  # 兼容旧导入
 
@@ -34,6 +34,7 @@ __all__ = [
     "AgentSessionRuntime",
     "CoreTurnContext",
     "SessionRuntimeFacade",
+    "RecoverTurnRequest",
     "InvalidTurnTransition",
     "TurnExecutionError",
     "TurnFailure",

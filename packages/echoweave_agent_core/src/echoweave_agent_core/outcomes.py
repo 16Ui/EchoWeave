@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from echoweave_agent_core.types import TurnResult
+from echoweave_runtime.tool_invocations import ToolInvocationBlockedError
 
 
 class TurnState(str, Enum):
@@ -88,6 +89,7 @@ class TurnFailureKind(str, Enum):
     RUNTIME = "runtime"
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"
+    INDETERMINATE_TOOL = "indeterminate_tool"
     INTERNAL = "internal"
 
 
@@ -186,6 +188,9 @@ def classify_turn_failure(error: BaseException, stage: str) -> TurnFailure:
     elif isinstance(error, asyncio.CancelledError):
         kind = TurnFailureKind.CANCELLED
         retryable = True
+    elif isinstance(error, ToolInvocationBlockedError):
+        kind = TurnFailureKind.INDETERMINATE_TOOL
+        retryable = False
     elif stage == "session":
         kind = TurnFailureKind.SESSION
         retryable = False

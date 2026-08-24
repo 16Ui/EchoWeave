@@ -51,3 +51,13 @@ class TurnResult:
     history: list[dict[str, Any]]
     summary: str | None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RecoverTurnRequest:
+    """Request a new execution attempt from a durable turn checkpoint."""
+
+    session_path: Path
+    checkpoint_id: str
+    allow_incomplete: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)

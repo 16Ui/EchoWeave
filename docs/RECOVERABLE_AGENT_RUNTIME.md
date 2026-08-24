@@ -24,6 +24,19 @@ else:
 
 旧的 `AgentCore.run_turn()` 保持兼容：成功时仍返回 `TurnResult`，失败时重新抛出原始异常。Coding Agent 和 Social Agent 主链已经改用 recoverable 入口，应用边界可以读取结构化结果，同时保留原有用户体验。
 
+失败或超时后，可以从该 Turn 的起始 checkpoint 发起受控恢复：
+
+```python
+recovered = core.recover_turn(
+    RecoverTurnRequest(
+        session_path=failed.session_path,
+        checkpoint_id=failed.checkpoint["id"],
+    )
+)
+```
+
+Coding Agent 对应提供 `agent.recover(session_path, checkpoint_id)`。
+
 ## 状态机约束
 
 ```text
@@ -54,6 +67,21 @@ created -> running -> completed
 
 进程崩溃后如果只留下 started 事件：只读和幂等写工具允许产生下一次 attempt；非幂等和未知工具进入 indeterminate 状态，默认禁止自动重放。并行批次也使用同一账本锁，防止同一 Runtime 内的重复调用同时穿透。
 
+## 受控恢复
+
+`recover_turn()` 会验证 checkpoint 和原 Turn 的关系，并从 checkpoint 的 inclusive event index 重建当时的 history/summary。恢复不会修改失败 attempt 的终态，而是：
+
+1. 保持原 `turn_id`，生成新的 `trace_id`；
+2. 为同一逻辑 Turn 创建 attempt 2、3……；
+3. 写入 `history_reset`，把失败尝试产生的消息从后续可见上下文中排除；
+4. 使用 checkpoint 后落盘的原始用户输入，不允许恢复时偷偷替换任务；
+5. 让 invocation ledger 对模型重新产生的工具调用执行复用、重试或阻断；
+6. 写入 `turn.recovery_started` / `turn.recovery_finished` 作为审计边界。
+
+已完成 Turn 不允许恢复。状态仍为 `running/created/waiting_for_tool/suspended` 的 Turn 默认也不允许恢复；只有操作者确认旧 executor 已不存在后，才能显式设置 `allow_incomplete=True`，避免两个执行器同时推进同一 Turn。
+
+恢复期间遇到 indeterminate 工具时，Runtime 不再把它降级成普通 tool error 交给模型继续推理，而是把 attempt 停在 `suspended`，返回 `TurnFailureKind.INDETERMINATE_TOOL`。这保证了“模型回复完成”不会掩盖副作用状态未知的问题。
+
 ## 恢复边界
 
 当前已保证：
@@ -64,6 +92,8 @@ created -> running -> completed
 - 旧调用方不会因 API 改造改变异常类型；
 - 已完成调用可复用 durable result，避免重复副作用；
 - 未完成调用按照工具副作用等级决定安全重试或阻断；
+- checkpoint 可重建历史，同一逻辑 Turn 可通过新 attempt 受控恢复；
+- indeterminate 工具会暂停恢复，而不是被 Agent Loop 静默吞掉；
 - 故障注入测试覆盖成功关联、超时、checkpoint 故障、调用冲突、结果复用和中断重放决策。
 
 当前尚未保证：
@@ -77,4 +107,4 @@ created -> running -> completed
 
 ## 下一阶段
 
-下一切片实现受控 `recover_turn(checkpoint_id)`：恢复原逻辑 `turn_id`，重建 checkpoint 后的模型上下文，让 invocation ledger 决定复用、重试或暂停，并把 indeterminate 调用暴露给用户确认，而不是静默继续执行。
+下一切片增加 indeterminate invocation 的人工处置协议：操作者可以选择“确认外部副作用已完成并补录结果”“确认未执行并允许重试”或“放弃该 Turn”。之后再加入 Provider 级重试预算、指数退避和熔断，避免把模型网络抖动与工具副作用恢复混为一谈。

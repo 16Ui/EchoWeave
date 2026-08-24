@@ -5,7 +5,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from echoweave_agent_core import AgentCore, AgentCoreConfig, TurnOutcome, TurnRequest, TurnResult
+from echoweave_agent_core import (
+    AgentCore,
+    AgentCoreConfig,
+    RecoverTurnRequest,
+    TurnOutcome,
+    TurnRequest,
+    TurnResult,
+)
 from echoweave_runtime.app import build_registry
 from echoweave_runtime.extensions.manager import ExtensionManager, build_extension_manager
 from echoweave_runtime.models.base import ModelClient
@@ -102,6 +109,23 @@ class CodingAgent:
 
     def create_checkpoint(self, session_path: str | Path, label: str | None = None) -> dict[str, Any]:
         return self.core.create_checkpoint(session_path, label=label)
+
+    def recover(
+        self,
+        session_path: str | Path,
+        checkpoint_id: str,
+        *,
+        allow_incomplete: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> TurnOutcome:
+        return self.core.recover_turn(
+            RecoverTurnRequest(
+                session_path=Path(session_path),
+                checkpoint_id=checkpoint_id,
+                allow_incomplete=allow_incomplete,
+                metadata=metadata or {},
+            )
+        )
 
     def replay_from_checkpoint(self, session_path: str | Path, checkpoint_id: str) -> dict[str, Any]:
         return self.core.replay_from_checkpoint(session_path, checkpoint_id)

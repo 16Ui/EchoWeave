@@ -143,6 +143,21 @@ class SessionStore:
         events = self.read_events(session_path)
         if not events:
             raise ValueError("session is empty")
+        return self._build_snapshot(session_path, events)
+
+    def load_snapshot_at(self, session_path: Path, event_index: int) -> SessionSnapshot:
+        """Rebuild the visible session state at an inclusive event index."""
+        events = self.read_events(session_path)
+        index = int(event_index)
+        if index < 0 or index >= len(events):
+            raise ValueError("event_index out of range")
+        return self._build_snapshot(session_path, events[: index + 1])
+
+    def _build_snapshot(
+        self,
+        session_path: Path,
+        events: list[StoredEvent],
+    ) -> SessionSnapshot:
         header = self.read_header(session_path)
         history: list[dict[str, Any]] = []
         summary: str | None = None
@@ -151,6 +166,13 @@ class SessionStore:
         for event in events[1:]:
             if event.type == "message":
                 history.append(event.payload)
+            elif event.type == "history_reset":
+                reset_history = event.payload.get("history")
+                if isinstance(reset_history, list):
+                    history = reset_history
+                reset_summary = event.payload.get("summary")
+                summary = reset_summary if isinstance(reset_summary, str) else None
+                compaction = None
             elif event.type == "tool_result":
                 history.append(
                     {
@@ -333,7 +355,23 @@ class SessionStore:
             ensure_turn_node(active_turn_id)
             turn_node_id = f"turn:{active_turn_id}"
 
-            if event.type == "tool_call":
+            if event.type == "turn.state_changed":
+                turn_node = node_map[turn_node_id]
+                state_value = str(payload.get("state") or "")
+                if state_value in {"failed", "timed_out", "cancelled"}:
+                    turn_node["status"] = "error"
+                elif state_value == "suspended":
+                    turn_node["status"] = "blocked"
+                elif state_value == "completed":
+                    turn_node["status"] = "ok"
+                else:
+                    turn_node["status"] = "running"
+                turn_node["attempt"] = normalize_positive_int(payload.get("attempt")) or 1
+                if state_value == "created":
+                    turn_node["start_ts"] = event.timestamp
+                if state_value in {"completed", "failed", "timed_out", "cancelled", "suspended"}:
+                    turn_node["end_ts"] = event.timestamp
+            elif event.type == "tool_call":
                 tool_id = str(payload.get("id") or f"tool-{index}")
                 node_id = f"tool:{tool_id}"
                 tool_node_ids[tool_id] = node_id
@@ -505,11 +543,11 @@ class SessionStore:
             "turn_count": sum(1 for node in nodes if node["type"] == "turn"),
             "tool_count": sum(1 for node in nodes if node["type"] == "tool"),
             "error_count": sum(1 for node in nodes if node["status"] == "error"),
-            "blocked_count": sum(1 for node in nodes if node["status"] == "blocked")
-            + sum(1 for event in events if event.type == "tool.invocation_blocked"),
+            "blocked_count": sum(1 for node in nodes if node["status"] == "blocked"),
             "tool_invocation_count": sum(1 for event in events if event.type == "tool.invocation_started"),
             "tool_invocation_reuse_count": sum(1 for event in events if event.type == "tool.invocation_reused"),
             "tool_invocation_blocked_count": sum(1 for event in events if event.type == "tool.invocation_blocked"),
+            "recovery_attempt_count": sum(1 for event in events if event.type == "turn.recovery_started"),
             "duration_ms": None,
         }
         return {"nodes": nodes, "edges": edges, "stats": stats}
