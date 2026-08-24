@@ -19,11 +19,18 @@ from echoweave_agent_core.sessions import (
     list_session_items,
     resolve_session_path,
 )
-from echoweave_agent_core.types import AgentCoreConfig, RecoverTurnRequest, TurnRequest, TurnResult
+from echoweave_agent_core.types import (
+    AgentCoreConfig,
+    RecoverTurnRequest,
+    ResolveToolInvocationRequest,
+    TurnRequest,
+    TurnResult,
+)
 from echoweave_runtime.app import build_runtime
 from echoweave_runtime.governance import record_runtime_audit
 from echoweave_runtime.runtime.agent_session import AgentSessionRuntime
 from echoweave_runtime.session.store import SessionStore
+from echoweave_runtime.tool_invocations import InvocationResolution
 
 
 class AgentCore:
@@ -94,6 +101,11 @@ class AgentCore:
         ]
         if not turn_states:
             raise ValueError(f"turn state not found for checkpoint: {request.checkpoint_id}")
+        if any(
+            event.type == "turn.abandoned" and event.payload.get("turn_id") == turn_id
+            for event in events
+        ):
+            raise ValueError("abandoned turns cannot be recovered")
         if any(state.get("state") == TurnState.COMPLETED.value for state in turn_states):
             raise ValueError("completed turns cannot be recovered")
         latest_state = str(turn_states[-1].get("state") or "")
@@ -103,7 +115,11 @@ class AgentCore:
             TurnState.WAITING_FOR_TOOL.value,
             TurnState.SUSPENDED.value,
         }
-        if latest_state in incomplete_states and not request.allow_incomplete:
+        resolved_suspension = latest_state == TurnState.SUSPENDED.value and self._suspension_is_resolved(
+            events,
+            turn_id,
+        )
+        if latest_state in incomplete_states and not request.allow_incomplete and not resolved_suspension:
             raise ValueError(
                 f"turn is {latest_state}; set allow_incomplete=true only after confirming no active executor remains"
             )
@@ -179,6 +195,88 @@ class AgentCore:
             },
         )
         return outcome
+
+    def list_indeterminate_tool_invocations(self, session_path: str | Path) -> list[dict[str, Any]]:
+        path = self.session_store.resolve_session_path(session_path)
+        return self.runtime.tool_invocation_ledger.list_indeterminate(path)
+
+    def resolve_tool_invocation(
+        self,
+        request: ResolveToolInvocationRequest,
+    ) -> dict[str, Any]:
+        if not isinstance(request.actor, str) or not request.actor.strip():
+            raise ValueError("manual invocation resolution requires an actor")
+        session_path = self.session_store.resolve_session_path(request.session_path)
+        events = self.session_store.read_events(session_path)
+        invocation_event = next(
+            (
+                event
+                for event in reversed(events)
+                if event.payload.get("invocation_key") == request.invocation_key
+                and event.type.startswith("tool.invocation_")
+            ),
+            None,
+        )
+        if invocation_event is None:
+            raise ValueError(f"tool invocation not found: {request.invocation_key}")
+        turn_id = str(invocation_event.payload.get("turn_id") or "")
+        turn_states = [
+            event.payload
+            for event in events
+            if event.type == "turn.state_changed" and event.payload.get("turn_id") == turn_id
+        ]
+        if not turn_states or turn_states[-1].get("state") != TurnState.SUSPENDED.value:
+            raise ValueError("manual invocation resolution requires a suspended turn")
+
+        resolution = (
+            request.resolution
+            if isinstance(request.resolution, InvocationResolution)
+            else InvocationResolution(str(request.resolution))
+        )
+        resolved = self.runtime.tool_invocation_ledger.resolve(
+            session_path,
+            invocation_key=request.invocation_key,
+            resolution=resolution,
+            outcome=request.outcome,
+            actor=request.actor,
+            note=request.note,
+        )
+        if resolution is InvocationResolution.ABANDON_TURN:
+            latest = turn_states[-1]
+            attempt = int(latest.get("attempt") or 1)
+            sequence = int(latest.get("sequence") or 2) + 1
+            trace_id = str(uuid4())
+            self._append_turn_state(
+                session_path,
+                turn_id=turn_id,
+                trace_id=trace_id,
+                previous=TurnState.SUSPENDED,
+                current=TurnState.CANCELLED,
+                sequence=sequence,
+                attempt=attempt,
+                failure={
+                    "kind": "operator_abandoned",
+                    "stage": "manual_resolution",
+                    "error_type": "TurnAbandoned",
+                    "message": request.note or "turn abandoned by operator",
+                    "retryable": False,
+                    "details": {"invocation_key": request.invocation_key},
+                },
+            )
+            self.session_store.append(
+                session_path,
+                "turn.abandoned",
+                {
+                    "turn_id": turn_id,
+                    "trace_id": trace_id,
+                    "attempt": attempt,
+                    "invocation_key": request.invocation_key,
+                    "actor": request.actor,
+                    "note": request.note,
+                },
+            )
+            resolved = {**resolved, "turn_state": TurnState.CANCELLED.value}
+        return resolved
 
     def _execute_turn(
         self,
@@ -543,6 +641,28 @@ class AgentCore:
             if isinstance(content, str) and content:
                 return content
         raise ValueError("recoverable turn prompt was not found after checkpoint")
+
+    @staticmethod
+    def _suspension_is_resolved(events: list[Any], turn_id: str) -> bool:
+        started: dict[str, int] = {}
+        completed: set[str] = set()
+        resolved: dict[str, int] = {}
+        for index, event in enumerate(events):
+            if event.payload.get("turn_id") != turn_id:
+                continue
+            key = str(event.payload.get("invocation_key") or "")
+            if not key:
+                continue
+            if event.type == "tool.invocation_started":
+                started[key] = index
+            elif event.type == "tool.invocation_completed":
+                completed.add(key)
+            elif event.type == "tool.invocation_resolved":
+                resolved[key] = index
+        indeterminate = {key: index for key, index in started.items() if key not in completed}
+        return bool(indeterminate) and all(
+            resolved.get(key, -1) > index for key, index in indeterminate.items()
+        )
 
 
 def _audit_metadata(metadata: dict[str, Any]) -> dict[str, Any]:

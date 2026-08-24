@@ -25,6 +25,8 @@ from echoweave_runtime.tool_invocations import (
     ToolEffect,
     ToolInvocationBlockedError,
     ToolInvocationLedger,
+    ToolInvocationPersistenceError,
+    ToolInvocationResultError,
     resolve_tool_effect,
 )
 from echoweave_runtime.tools.bash import BashTool
@@ -523,7 +525,7 @@ class AgentSessionRuntime:
             outcome = decision.outcome or {}
             if outcome.get("status") == "ok":
                 return sanitize_value(outcome.get("content"))
-            raise ToolInvocationBlockedError(
+            raise ToolInvocationResultError(
                 f"durable tool result is an error: {outcome.get('error', 'unknown tool error')}"
             )
         if decision.action != "execute":
@@ -539,6 +541,23 @@ class AgentSessionRuntime:
             )
             result = tool.execute(tool_input)
         except Exception as exc:
+            try:
+                self.tool_invocation_ledger.complete(
+                    session_path,
+                    decision,
+                    turn_id=turn_id,
+                    trace_id=self._active_trace_id,
+                    tool_call_id=tool_id,
+                    tool_name=tool_name,
+                    outcome={"status": "error", "error": f"{type(exc).__name__}: {exc}"},
+                )
+            except Exception as persist_error:
+                raise ToolInvocationPersistenceError(
+                    f"tool failed and its durable outcome could not be recorded: {persist_error}"
+                ) from persist_error
+            raise
+        normalized = sanitize_value(result)
+        try:
             self.tool_invocation_ledger.complete(
                 session_path,
                 decision,
@@ -546,19 +565,12 @@ class AgentSessionRuntime:
                 trace_id=self._active_trace_id,
                 tool_call_id=tool_id,
                 tool_name=tool_name,
-                outcome={"status": "error", "error": f"{type(exc).__name__}: {exc}"},
+                outcome={"status": "ok", "content": normalized},
             )
-            raise
-        normalized = sanitize_value(result)
-        self.tool_invocation_ledger.complete(
-            session_path,
-            decision,
-            turn_id=turn_id,
-            trace_id=self._active_trace_id,
-            tool_call_id=tool_id,
-            tool_name=tool_name,
-            outcome={"status": "ok", "content": normalized},
-        )
+        except Exception as persist_error:
+            raise ToolInvocationPersistenceError(
+                f"tool returned but its durable outcome could not be recorded: {persist_error}"
+            ) from persist_error
         return normalized
 
     def _emit_tool_execution_event(
@@ -718,7 +730,9 @@ class AgentSessionRuntime:
                 tool=tool,
             )
         except Exception as exc:
-            if stop_on_blocked_tool and isinstance(exc, ToolInvocationBlockedError):
+            if isinstance(exc, ToolInvocationPersistenceError) or (
+                stop_on_blocked_tool and isinstance(exc, ToolInvocationBlockedError)
+            ):
                 raise
             error = sanitize_value(f"{type(exc).__name__}: {exc}")
             self.session_store.append(
@@ -1798,7 +1812,9 @@ class AgentSessionRuntime:
                             tool=tool,
                         )
                     except Exception as exc:
-                        if stop_on_blocked_tool and isinstance(exc, ToolInvocationBlockedError):
+                        if isinstance(exc, ToolInvocationPersistenceError) or (
+                            stop_on_blocked_tool and isinstance(exc, ToolInvocationBlockedError)
+                        ):
                             return {
                                 "status": "blocked",
                                 "error": sanitize_value(f"{type(exc).__name__}: {exc}"),
@@ -1818,7 +1834,7 @@ class AgentSessionRuntime:
                     tool_input = sanitize_value(entry["tool_input"])
                     tool_index = int(entry["tool_index"])
 
-                    if stop_on_blocked_tool and execution_outcome.get("status") == "blocked":
+                    if execution_outcome.get("status") == "blocked":
                         raise ToolInvocationBlockedError(str(execution_outcome.get("error", "tool invocation blocked")))
 
                     if execution_outcome.get("status") == "error":
@@ -2333,7 +2349,9 @@ class AgentSessionRuntime:
                         tool=tool,
                     )
                 except Exception as exc:
-                    if stop_on_blocked_tool and isinstance(exc, ToolInvocationBlockedError):
+                    if isinstance(exc, ToolInvocationPersistenceError) or (
+                        stop_on_blocked_tool and isinstance(exc, ToolInvocationBlockedError)
+                    ):
                         raise
                     # 工具失败时统一写 tool_error，并把错误包装成 tool_result 回给模型继续推理。
                     error_message = sanitize_value(f"{type(exc).__name__}: {exc}")

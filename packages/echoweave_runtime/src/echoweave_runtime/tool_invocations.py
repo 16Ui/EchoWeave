@@ -27,6 +27,20 @@ class ToolInvocationBlockedError(RuntimeError):
     """Raised when replay safety cannot be established automatically."""
 
 
+class ToolInvocationResultError(RuntimeError):
+    """Represents a durably recorded tool error that must not be executed again."""
+
+
+class ToolInvocationPersistenceError(ToolInvocationBlockedError):
+    """Raised when a tool returned but its durable completion could not be recorded."""
+
+
+class InvocationResolution(str, Enum):
+    CONFIRM_COMPLETED = "confirm_completed"
+    ALLOW_RETRY = "allow_retry"
+    ABANDON_TURN = "abandon_turn"
+
+
 @dataclass(frozen=True)
 class InvocationDecision:
     action: str
@@ -161,6 +175,61 @@ class ToolInvocationLedger:
                     outcome=normalized_outcome,
                 )
 
+            resolution = next(
+                (record for record in reversed(matching) if record.get("event") == "tool.invocation_resolved"),
+                None,
+            )
+            if resolution is not None and resolution.get("resolution") == InvocationResolution.CONFIRM_COMPLETED.value:
+                outcome = resolution.get("outcome")
+                normalized_outcome = (
+                    outcome
+                    if isinstance(outcome, dict)
+                    else {"status": "error", "error": "manual resolution outcome is missing"}
+                )
+                attempt = int(resolution.get("attempt") or 1)
+                self._append_decision(
+                    session_path,
+                    "tool.invocation_reused",
+                    invocation_key=invocation_key,
+                    identity=identity,
+                    fingerprint=fingerprint,
+                    turn_id=turn_id,
+                    trace_id=trace_id,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    effect=effect,
+                    attempt=attempt,
+                    outcome=normalized_outcome,
+                    manual_resolution=True,
+                )
+                return InvocationDecision(
+                    "reuse",
+                    invocation_key,
+                    identity,
+                    fingerprint,
+                    effect,
+                    attempt,
+                    outcome=normalized_outcome,
+                )
+            if resolution is not None and resolution.get("resolution") == InvocationResolution.ABANDON_TURN.value:
+                reason = "the invocation and its turn were abandoned by an operator"
+                self._append_decision(
+                    session_path,
+                    "tool.invocation_blocked",
+                    invocation_key=invocation_key,
+                    identity=identity,
+                    fingerprint=fingerprint,
+                    turn_id=turn_id,
+                    trace_id=trace_id,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    effect=effect,
+                    reason=reason,
+                )
+                return InvocationDecision(
+                    "abandoned", invocation_key, identity, fingerprint, effect, 0, reason=reason
+                )
+
             if invocation_key in self._in_flight:
                 reason = "the same invocation is already executing in this runtime"
                 self._append_decision(
@@ -181,7 +250,11 @@ class ToolInvocationLedger:
                 )
 
             attempts = [int(record.get("attempt") or 1) for record in matching if record.get("event") == "tool.invocation_started"]
-            if attempts and not effect.safe_after_interruption:
+            retry_authorized = False
+            if resolution is not None and resolution.get("resolution") == InvocationResolution.ALLOW_RETRY.value:
+                authorized_attempt = int(resolution.get("authorized_attempt") or 0)
+                retry_authorized = authorized_attempt == max(attempts, default=0) + 1
+            if attempts and not effect.safe_after_interruption and not retry_authorized:
                 reason = "previous execution has no durable result and the tool is not safe to replay"
                 self._append_decision(
                     session_path,
@@ -221,6 +294,7 @@ class ToolInvocationLedger:
                 effect=effect,
                 attempt=attempt,
                 replay_after_interruption=bool(attempts),
+                manual_retry=retry_authorized,
             )
             self._in_flight.add(invocation_key)
             return InvocationDecision("execute", invocation_key, identity, fingerprint, effect, attempt)
@@ -255,6 +329,125 @@ class ToolInvocationLedger:
             )
             self._in_flight.discard(decision.invocation_key)
 
+    def resolve(
+        self,
+        session_path: Path,
+        *,
+        invocation_key: str,
+        resolution: InvocationResolution | str,
+        outcome: dict[str, Any] | None = None,
+        actor: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            action = resolution if isinstance(resolution, InvocationResolution) else InvocationResolution(str(resolution))
+        except ValueError as exc:
+            raise ValueError(f"unknown invocation resolution: {resolution}") from exc
+        with self._lock:
+            records = self._records_by_key(session_path, invocation_key)
+            started = [record for record in records if record.get("event") == "tool.invocation_started"]
+            if not started:
+                raise ValueError(f"tool invocation not found: {invocation_key}")
+            if any(record.get("event") == "tool.invocation_completed" for record in records):
+                raise ValueError("completed tool invocations do not require manual resolution")
+            existing = next(
+                (record for record in reversed(records) if record.get("event") == "tool.invocation_resolved"),
+                None,
+            )
+            normalized_outcome = self._validate_resolution_outcome(action, outcome)
+            if existing is not None:
+                if (
+                    existing.get("resolution") == action.value
+                    and existing.get("outcome") == normalized_outcome
+                ):
+                    return existing
+                raise ValueError("tool invocation already has a different manual resolution")
+
+            base = started[-1]
+            max_attempt = max(int(record.get("attempt") or 1) for record in started)
+            payload: dict[str, Any] = {
+                "invocation_key": invocation_key,
+                "identity": base.get("identity"),
+                "fingerprint": base.get("fingerprint"),
+                "turn_id": base.get("turn_id"),
+                "trace_id": base.get("trace_id"),
+                "tool_call_id": base.get("tool_call_id"),
+                "tool_name": base.get("tool_name"),
+                "effect": base.get("effect", ToolEffect.UNKNOWN.value),
+                "attempt": max_attempt,
+                "resolution": action.value,
+                "actor": actor,
+                "note": note,
+            }
+            if normalized_outcome is not None:
+                payload["outcome"] = normalized_outcome
+            if action is InvocationResolution.ALLOW_RETRY:
+                payload["authorized_attempt"] = max_attempt + 1
+            self.session_store.append(session_path, "tool.invocation_resolved", payload)
+            self._in_flight.discard(invocation_key)
+            return payload
+
+    def list_indeterminate(self, session_path: Path) -> list[dict[str, Any]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for event in self.session_store.read_events(session_path):
+            if not event.type.startswith("tool.invocation_"):
+                continue
+            key = str(event.payload.get("invocation_key") or "")
+            if key:
+                grouped.setdefault(key, []).append({"event": event.type, **event.payload})
+        unresolved: list[dict[str, Any]] = []
+        for key, records in grouped.items():
+            if not any(record.get("event") == "tool.invocation_started" for record in records):
+                continue
+            if any(record.get("event") == "tool.invocation_completed" for record in records):
+                continue
+            resolution = next(
+                (record for record in reversed(records) if record.get("event") == "tool.invocation_resolved"),
+                None,
+            )
+            if resolution is not None and resolution.get("resolution") in {
+                InvocationResolution.CONFIRM_COMPLETED.value,
+                InvocationResolution.ABANDON_TURN.value,
+            }:
+                continue
+            blocked = next(
+                (record for record in reversed(records) if record.get("event") == "tool.invocation_blocked"),
+                None,
+            )
+            latest_started = next(
+                record for record in reversed(records) if record.get("event") == "tool.invocation_started"
+            )
+            max_attempt = max(
+                int(record.get("attempt") or 1)
+                for record in records
+                if record.get("event") == "tool.invocation_started"
+            )
+            resolution_value = resolution.get("resolution") if resolution else None
+            if (
+                resolution_value == InvocationResolution.ALLOW_RETRY.value
+                and int(resolution.get("authorized_attempt") or 0) <= max_attempt
+            ):
+                resolution_value = None
+            authorized_attempt = (
+                resolution.get("authorized_attempt")
+                if resolution is not None and resolution_value == InvocationResolution.ALLOW_RETRY.value
+                else None
+            )
+            unresolved.append(
+                {
+                    "invocation_key": key,
+                    "turn_id": latest_started.get("turn_id"),
+                    "tool_call_id": latest_started.get("tool_call_id"),
+                    "tool_name": latest_started.get("tool_name"),
+                    "effect": latest_started.get("effect"),
+                    "attempt": latest_started.get("attempt"),
+                    "reason": blocked.get("reason") if blocked else "durable completion is missing",
+                    "resolution": resolution_value,
+                    "authorized_attempt": authorized_attempt,
+                }
+            )
+        return unresolved
+
     def _records(self, session_path: Path, identity: str) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         for event in self.session_store.read_events(session_path):
@@ -264,6 +457,32 @@ class ToolInvocationLedger:
                 continue
             records.append({"event": event.type, **event.payload})
         return records
+
+    def _records_by_key(self, session_path: Path, invocation_key: str) -> list[dict[str, Any]]:
+        return [
+            {"event": event.type, **event.payload}
+            for event in self.session_store.read_events(session_path)
+            if event.type.startswith("tool.invocation_")
+            and event.payload.get("invocation_key") == invocation_key
+        ]
+
+    @staticmethod
+    def _validate_resolution_outcome(
+        resolution: InvocationResolution,
+        outcome: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if resolution is not InvocationResolution.CONFIRM_COMPLETED:
+            if outcome is not None:
+                raise ValueError("outcome is only valid for confirm_completed")
+            return None
+        if not isinstance(outcome, dict):
+            raise ValueError("confirm_completed requires an outcome")
+        status = str(outcome.get("status") or "")
+        if status == "ok" and "content" in outcome:
+            return sanitize_value({"status": "ok", "content": outcome.get("content")})
+        if status == "error" and "error" in outcome:
+            return sanitize_value({"status": "error", "error": str(outcome.get("error"))})
+        raise ValueError("outcome must be {status: ok, content: ...} or {status: error, error: ...}")
 
     def _append_decision(
         self,
@@ -282,6 +501,8 @@ class ToolInvocationLedger:
         outcome: dict[str, Any] | None = None,
         reason: str | None = None,
         replay_after_interruption: bool = False,
+        manual_retry: bool = False,
+        manual_resolution: bool = False,
     ) -> None:
         payload: dict[str, Any] = {
             "invocation_key": invocation_key,
@@ -301,4 +522,8 @@ class ToolInvocationLedger:
             payload["reason"] = reason
         if replay_after_interruption:
             payload["replay_after_interruption"] = True
+        if manual_retry:
+            payload["manual_retry"] = True
+        if manual_resolution:
+            payload["manual_resolution"] = True
         self.session_store.append(session_path, event_type, payload)

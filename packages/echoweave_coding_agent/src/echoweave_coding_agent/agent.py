@@ -9,6 +9,7 @@ from echoweave_agent_core import (
     AgentCore,
     AgentCoreConfig,
     RecoverTurnRequest,
+    ResolveToolInvocationRequest,
     TurnOutcome,
     TurnRequest,
     TurnResult,
@@ -18,6 +19,7 @@ from echoweave_runtime.extensions.manager import ExtensionManager, build_extensi
 from echoweave_runtime.models.base import ModelClient
 from echoweave_runtime.models.factory import ProviderCapabilities
 from echoweave_runtime.session.store import SessionStore
+from echoweave_runtime.tool_invocations import InvocationResolution
 from echoweave_runtime.types import ToolExecutionMode
 
 
@@ -124,6 +126,30 @@ class CodingAgent:
                 checkpoint_id=checkpoint_id,
                 allow_incomplete=allow_incomplete,
                 metadata=metadata or {},
+            )
+        )
+
+    def list_indeterminate_tool_invocations(self, session_path: str | Path) -> list[dict[str, Any]]:
+        return self.core.list_indeterminate_tool_invocations(session_path)
+
+    def resolve_tool_invocation(
+        self,
+        session_path: str | Path,
+        invocation_key: str,
+        resolution: InvocationResolution | str,
+        *,
+        outcome: dict[str, Any] | None = None,
+        actor: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        return self.core.resolve_tool_invocation(
+            ResolveToolInvocationRequest(
+                session_path=Path(session_path),
+                invocation_key=invocation_key,
+                resolution=resolution,
+                outcome=outcome,
+                actor=actor,
+                note=note,
             )
         )
 

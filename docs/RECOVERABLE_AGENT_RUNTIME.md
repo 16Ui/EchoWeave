@@ -67,6 +67,8 @@ created -> running -> completed
 
 进程崩溃后如果只留下 started 事件：只读和幂等写工具允许产生下一次 attempt；非幂等和未知工具进入 indeterminate 状态，默认禁止自动重放。并行批次也使用同一账本锁，防止同一 Runtime 内的重复调用同时穿透。
 
+如果工具已经返回，但 `tool.invocation_completed` 写入失败，Runtime 会立即把当前 Turn 停在 `suspended`，不会继续让模型生成成功回复。该规则同时适用于首次执行和恢复 attempt。
+
 ## 受控恢复
 
 `recover_turn()` 会验证 checkpoint 和原 Turn 的关系，并从 checkpoint 的 inclusive event index 重建当时的 history/summary。恢复不会修改失败 attempt 的终态，而是：
@@ -82,6 +84,33 @@ created -> running -> completed
 
 恢复期间遇到 indeterminate 工具时，Runtime 不再把它降级成普通 tool error 交给模型继续推理，而是把 attempt 停在 `suspended`，返回 `TurnFailureKind.INDETERMINATE_TOOL`。这保证了“模型回复完成”不会掩盖副作用状态未知的问题。
 
+## 人工处置 indeterminate 调用
+
+暂停后可以通过 `list_indeterminate_tool_invocations()` 获取 invocation key、工具、副作用等级、attempt 和阻断原因，再调用 `resolve_tool_invocation()` 写入 append-only 人工决策：
+
+- `confirm_completed`：操作者确认外部副作用已经完成，并提供 `{status: ok, content: ...}` 或 `{status: error, error: ...}`。下次恢复会复用补录结果，不重新调用工具；
+- `allow_retry`：操作者确认上一次副作用没有发生，仅授权下一个 invocation attempt 执行一次。授权一经消费即失效，如果仍没有 durable completion，Turn 会再次暂停；
+- `abandon_turn`：放弃该调用和整个 Turn，状态从 `suspended` 进入 `cancelled`，之后禁止恢复。
+
+```python
+pending = core.list_indeterminate_tool_invocations(session_path)
+core.resolve_tool_invocation(
+    ResolveToolInvocationRequest(
+        session_path=session_path,
+        invocation_key=pending[0]["invocation_key"],
+        resolution="confirm_completed",
+        outcome={"status": "ok", "content": "external operation confirmed"},
+        actor="operator-id",
+        note="verified in external system",
+    )
+)
+recovered = core.recover_turn(
+    RecoverTurnRequest(session_path=session_path, checkpoint_id=checkpoint_id)
+)
+```
+
+人工决策以 `tool.invocation_resolved` 事件保存，并记录 actor/note。Coding Agent 同样暴露 list/resolve 方法。只有 `suspended` Turn 可以接受这类决策，避免把人工覆盖变成任意篡改正常执行结果的后门。
+
 ## 恢复边界
 
 当前已保证：
@@ -94,6 +123,7 @@ created -> running -> completed
 - 未完成调用按照工具副作用等级决定安全重试或阻断；
 - checkpoint 可重建历史，同一逻辑 Turn 可通过新 attempt 受控恢复；
 - indeterminate 工具会暂停恢复，而不是被 Agent Loop 静默吞掉；
+- 人工补录、单次重试授权和放弃操作均形成可审计事件；
 - 故障注入测试覆盖成功关联、超时、checkpoint 故障、调用冲突、结果复用和中断重放决策。
 
 当前尚未保证：
@@ -107,4 +137,4 @@ created -> running -> completed
 
 ## 下一阶段
 
-下一切片增加 indeterminate invocation 的人工处置协议：操作者可以选择“确认外部副作用已完成并补录结果”“确认未执行并允许重试”或“放弃该 Turn”。之后再加入 Provider 级重试预算、指数退避和熔断，避免把模型网络抖动与工具副作用恢复混为一谈。
+下一切片加入 Provider 级重试预算、指数退避和熔断。Provider 网络抖动只允许在明确预算内重试，并与工具副作用恢复保持分层，避免模型重试隐式重复整个 Agent Loop。

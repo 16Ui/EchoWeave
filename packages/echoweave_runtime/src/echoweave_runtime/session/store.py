@@ -547,6 +547,7 @@ class SessionStore:
             "tool_invocation_count": sum(1 for event in events if event.type == "tool.invocation_started"),
             "tool_invocation_reuse_count": sum(1 for event in events if event.type == "tool.invocation_reused"),
             "tool_invocation_blocked_count": sum(1 for event in events if event.type == "tool.invocation_blocked"),
+            "tool_invocation_resolution_count": sum(1 for event in events if event.type == "tool.invocation_resolved"),
             "recovery_attempt_count": sum(1 for event in events if event.type == "turn.recovery_started"),
             "duration_ms": None,
         }

@@ -70,6 +70,7 @@ EchoWeave
 - 可恢复 Turn 协议：结构化 Outcome、显式状态机、失败分类、起始 checkpoint 与跨层 trace 关联。
 - Tool Invocation 账本：稳定调用键、参数冲突检测、结果复用和基于副作用等级的中断重放保护。
 - 受控 Turn 恢复：从 checkpoint 重建可见历史，以同一逻辑 Turn 的新 attempt 继续，并在危险副作用不确定时暂停。
+- 人工恢复决策：支持补录工具结果、一次性授权重试或放弃 Turn，并保留操作者与原因审计。
 - Docker Compose：包含 EchoWeave + PostgreSQL + pgvector 的部署形态。
 
 可恢复执行的当前边界和后续幂等设计见

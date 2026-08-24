@@ -8,7 +8,12 @@ from uuid import uuid4
 from echoweave_runtime.app import build_runtime
 from echoweave_runtime.models.demo import SequenceModelClient
 from echoweave_runtime.session.store import SessionStore
-from echoweave_runtime.tool_invocations import ToolEffect, ToolInvocationLedger, resolve_tool_effect
+from echoweave_runtime.tool_invocations import (
+    InvocationResolution,
+    ToolEffect,
+    ToolInvocationLedger,
+    resolve_tool_effect,
+)
 from echoweave_runtime.tools.write import WriteTool
 from echoweave_runtime.tools_base import ToolRegistry
 from echoweave_runtime.types import AgentResponse, ToolCall
@@ -178,3 +183,106 @@ def test_tool_effect_can_be_refined_by_arguments() -> None:
             )
             is ToolEffect.NON_IDEMPOTENT
         )
+
+
+def test_manual_completion_is_reused_as_a_durable_result() -> None:
+    with _local_tmp() as tmp_path:
+        store = SessionStore(tmp_path / "sessions")
+        session_path = store.create()
+        crashed = ToolInvocationLedger(store)
+        started = crashed.prepare(
+            session_path,
+            turn_id="turn-manual",
+            trace_id="trace-1",
+            tool_call_id="call-1",
+            tool_name="external-write",
+            tool_input={"value": "A"},
+            effect=ToolEffect.NON_IDEMPOTENT,
+        )
+        operator = ToolInvocationLedger(store)
+        blocked = operator.prepare(
+            session_path,
+            turn_id="turn-manual",
+            trace_id="trace-2",
+            tool_call_id="call-1",
+            tool_name="external-write",
+            tool_input={"value": "A"},
+            effect=ToolEffect.NON_IDEMPOTENT,
+        )
+
+        resolution = operator.resolve(
+            session_path,
+            invocation_key=started.invocation_key,
+            resolution=InvocationResolution.CONFIRM_COMPLETED,
+            outcome={"status": "ok", "content": "confirmed external result"},
+            actor="tester",
+        )
+        replay = ToolInvocationLedger(store).prepare(
+            session_path,
+            turn_id="turn-manual",
+            trace_id="trace-3",
+            tool_call_id="call-1",
+            tool_name="external-write",
+            tool_input={"value": "A"},
+            effect=ToolEffect.NON_IDEMPOTENT,
+        )
+
+        assert blocked.action == "indeterminate"
+        assert resolution["resolution"] == "confirm_completed"
+        assert replay.action == "reuse"
+        assert replay.outcome == {"status": "ok", "content": "confirmed external result"}
+
+
+def test_manual_retry_authorization_is_consumed_after_one_attempt() -> None:
+    with _local_tmp() as tmp_path:
+        store = SessionStore(tmp_path / "sessions")
+        session_path = store.create()
+        first = ToolInvocationLedger(store).prepare(
+            session_path,
+            turn_id="turn-retry",
+            trace_id="trace-1",
+            tool_call_id="call-1",
+            tool_name="external-write",
+            tool_input={"value": "A"},
+            effect=ToolEffect.NON_IDEMPOTENT,
+        )
+        operator = ToolInvocationLedger(store)
+        assert operator.prepare(
+            session_path,
+            turn_id="turn-retry",
+            trace_id="trace-2",
+            tool_call_id="call-1",
+            tool_name="external-write",
+            tool_input={"value": "A"},
+            effect=ToolEffect.NON_IDEMPOTENT,
+        ).action == "indeterminate"
+        resolution = operator.resolve(
+            session_path,
+            invocation_key=first.invocation_key,
+            resolution=InvocationResolution.ALLOW_RETRY,
+            actor="tester",
+        )
+
+        authorized = ToolInvocationLedger(store).prepare(
+            session_path,
+            turn_id="turn-retry",
+            trace_id="trace-3",
+            tool_call_id="call-1",
+            tool_name="external-write",
+            tool_input={"value": "A"},
+            effect=ToolEffect.NON_IDEMPOTENT,
+        )
+        blocked_again = ToolInvocationLedger(store).prepare(
+            session_path,
+            turn_id="turn-retry",
+            trace_id="trace-4",
+            tool_call_id="call-1",
+            tool_name="external-write",
+            tool_input={"value": "A"},
+            effect=ToolEffect.NON_IDEMPOTENT,
+        )
+
+        assert resolution["authorized_attempt"] == 2
+        assert authorized.action == "execute"
+        assert authorized.attempt == 2
+        assert blocked_again.action == "indeterminate"

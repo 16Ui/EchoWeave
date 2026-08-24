@@ -19,6 +19,7 @@ from echoweave_agent_core import (
     CoreTurnContext,
     InvalidTurnTransition,
     RecoverTurnRequest,
+    ResolveToolInvocationRequest,
     SessionRuntimeFacade,
     TurnFailureKind,
     TurnRequest,
@@ -40,6 +41,7 @@ from echoweave_runtime.rag.pgvector_hybrid import PgVectorHybridConfig, PgVector
 from echoweave_runtime.models.demo import AgentResponse, SequenceModelClient, tool_response
 from echoweave_runtime.models.base import ModelClient
 from echoweave_runtime.session.store import SessionStore
+from echoweave_runtime.tool_invocations import InvocationResolution, ToolEffect, ToolInvocationLedger
 from echoweave_runtime.tools_base import ToolRegistry
 from echoweave_runtime.types import ToolCall
 from echoweave_social.adapters.astrbot_event import AstrBotEventAdapter
@@ -377,7 +379,9 @@ def test_recover_turn_suspends_when_non_idempotent_completion_is_indeterminate()
         )
 
         failed = first_core.execute_turn(TurnRequest(prompt="perform uncertain work", resume=False))
-        assert failed.state is TurnState.TIMED_OUT
+        assert failed.state is TurnState.SUSPENDED
+        assert failed.failure is not None
+        assert failed.failure.kind is TurnFailureKind.INDETERMINATE_TOOL
         assert failed.checkpoint is not None
         assert tool.calls == 1
 
@@ -388,19 +392,107 @@ def test_recover_turn_suspends_when_non_idempotent_completion_is_indeterminate()
                 session_store=store,
             )
         )
-        recovered = recovered_core.recover_turn(
+        indeterminate = recovered_core.list_indeterminate_tool_invocations(failed.session_path)
+        assert len(indeterminate) == 1
+        resolved = recovered_core.resolve_tool_invocation(
+            ResolveToolInvocationRequest(
+                session_path=failed.session_path,
+                invocation_key=indeterminate[0]["invocation_key"],
+                resolution=InvocationResolution.CONFIRM_COMPLETED,
+                outcome={"status": "ok", "content": "operator confirmed completion"},
+                actor="test-operator",
+            )
+        )
+        assert resolved["resolution"] == "confirm_completed"
+
+        final_core = AgentCore.from_config(
+            AgentCoreConfig(
+                model_client=_RecoveringModel([call, AgentResponse(text="resolved recovery")]),
+                tool_registry=registry,
+                session_store=store,
+            )
+        )
+        final = final_core.recover_turn(
             RecoverTurnRequest(
                 session_path=failed.session_path,
                 checkpoint_id=str(failed.checkpoint["id"]),
             )
         )
-
-        assert recovered.state is TurnState.SUSPENDED
-        assert recovered.failure is not None
-        assert recovered.failure.kind is TurnFailureKind.INDETERMINATE_TOOL
-        assert recovered.failure.retryable is False
+        assert final.succeeded is True
+        assert final.require_result().text == "resolved recovery"
         assert tool.calls == 1
-        finished = [
-            event for event in store.read_events(failed.session_path) if event.type == "turn.recovery_finished"
-        ]
-        assert finished[-1].payload["state"] == "suspended"
+
+
+def test_abandoned_indeterminate_turn_cannot_be_recovered() -> None:
+    with _local_tmp() as tmp_path:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        store = SessionStore(workspace / "sessions")
+        session_path = store.create()
+        turn_id = "turn-to-abandon"
+        store.append(
+            session_path,
+            "turn.state_changed",
+            {"turn_id": turn_id, "trace_id": "trace-1", "from": None, "state": "created", "sequence": 0, "attempt": 1},
+        )
+        store.append(
+            session_path,
+            "turn.state_changed",
+            {"turn_id": turn_id, "trace_id": "trace-1", "from": "created", "state": "running", "sequence": 1, "attempt": 1},
+        )
+        checkpoint = store.create_checkpoint(
+            session_path,
+            label="turn:turn-to-abandon:start",
+            turn_id=turn_id,
+            trace_id="trace-1",
+        )
+        ledger = ToolInvocationLedger(store)
+        started = ledger.prepare(
+            session_path,
+            turn_id=turn_id,
+            trace_id="trace-1",
+            tool_call_id="call-1",
+            tool_name="external-write",
+            tool_input={"value": "A"},
+            effect=ToolEffect.NON_IDEMPOTENT,
+        )
+        ToolInvocationLedger(store).prepare(
+            session_path,
+            turn_id=turn_id,
+            trace_id="trace-2",
+            tool_call_id="call-1",
+            tool_name="external-write",
+            tool_input={"value": "A"},
+            effect=ToolEffect.NON_IDEMPOTENT,
+        )
+        store.append(
+            session_path,
+            "turn.state_changed",
+            {"turn_id": turn_id, "trace_id": "trace-2", "from": "running", "state": "suspended", "sequence": 2, "attempt": 1},
+        )
+        core = AgentCore.from_config(
+            AgentCoreConfig(
+                model_client=SequenceModelClient([]),
+                tool_registry=ToolRegistry(),
+                session_store=store,
+            )
+        )
+
+        resolution = core.resolve_tool_invocation(
+            ResolveToolInvocationRequest(
+                session_path=session_path,
+                invocation_key=started.invocation_key,
+                resolution=InvocationResolution.ABANDON_TURN,
+                actor="test-operator",
+                note="external state cannot be verified",
+            )
+        )
+
+        assert resolution["turn_state"] == "cancelled"
+        with pytest.raises(ValueError, match="abandoned turns cannot be recovered"):
+            core.recover_turn(
+                RecoverTurnRequest(
+                    session_path=session_path,
+                    checkpoint_id=str(checkpoint["id"]),
+                )
+            )

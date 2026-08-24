@@ -8,6 +8,7 @@ from echoweave_runtime.extensions.manager import ExtensionManager
 from echoweave_runtime.models.base import ModelClient
 from echoweave_runtime.models.factory import ProviderCapabilities
 from echoweave_runtime.session.store import SessionStore
+from echoweave_runtime.tool_invocations import InvocationResolution
 from echoweave_runtime.tools_base import ToolRegistry
 from echoweave_runtime.types import ToolExecutionMode
 
@@ -61,3 +62,15 @@ class RecoverTurnRequest:
     checkpoint_id: str
     allow_incomplete: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ResolveToolInvocationRequest:
+    """Record an operator decision for an indeterminate tool invocation."""
+
+    session_path: Path
+    invocation_key: str
+    resolution: InvocationResolution | str
+    outcome: dict[str, Any] | None = None
+    actor: str | None = None
+    note: str | None = None
