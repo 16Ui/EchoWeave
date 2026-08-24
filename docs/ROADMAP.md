@@ -23,6 +23,7 @@ EchoWeave 的主线是可扩展的个人 Agent Runtime。实习经验只用于�
 
 - Plugin Manifest 声明版本、依赖、权限和支持平台；
 - [已完成首个切片] AstrBot Manifest/配置/Skills 静态兼容检查与 API 使用分级，不执行未审查插件；
+- [已完成基础运行桥] AstrBot command/filter 编译、独立 Worker、Runtime Host 生命周期和超时终止；
 - 支持安装、启停、热重载和失败隔离；
 - 区分 Plugin、Skill、Tool 和 Agent Profile；
 - 提供最小插件 SDK、示例插件和契约测试。

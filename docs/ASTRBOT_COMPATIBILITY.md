@@ -49,25 +49,50 @@ AstrBot 使用 `metadata.yaml` 描述插件身份、版本、仓库、支持平�
 | `_conf_schema.json` | 已兼容基础格式 | 加载前验证 JSON object，不执行 UI 特殊字段 |
 | 插件 `skills/**/SKILL.md` | 已识别 | 作为只读资源发现，尚未自动启用 |
 | `astrbot.api.*` import | 已识别 | 进入 API 兼容候选，不代表可执行 |
-| command / group / message / platform / permission filter | 已识别 | 下一阶段编译为 EchoWeave Handler Descriptor |
+| command / group / message / platform / permission filter | 基础子集可执行 | 编译为 `AstrBotHandlerDescriptor`；支持基础命令、别名、参数和单值过滤器 |
 | LLM、Tool 与生命周期 Hooks | 已识别 | 报告警告，等待 Hook 语义映射 |
-| `terminate()` | 规划兼容 | 将接入 Runtime Host 的逆序关闭 |
+| `initialize()` / `terminate()` | 已兼容 | 独立 Worker 随 Runtime Host 启停并逆序关闭 |
 | `astrbot.core.*` | 阻断 | 要求插件改用公共 API 或专用桥接器 |
 | 动态 import | 阻断 | 兼容加载器不接受不可静态判断的入口 |
 | Plugin Pages / Web API | 未兼容 | 需要独立路由和权限模型，不能直接挂载 |
-| 直接运行任意 AstrBot 插件 | 未兼容 | 必须先通过分析、权限声明和执行隔离 |
+| 通过检查的基础命令插件 | 显式启用后可运行 | `allow_execution=True` 后在独立 Worker 进程执行 |
+| 任意 AstrBot 插件 | 未兼容 | 高级 Context、Provider、消息组件、Web API 和未知 Hook 仍不执行 |
 
 `metadata-compatible` 表示元数据、配置或 Skills 可被读取；`api-candidate` 表示使用了可映射的 AstrBot
 公共 API；`blocked` 表示存在核心内部依赖、动态加载或结构错误。当前所有报告的 `execution_ready` 都是
-`false`，防止把“可分析”误写成“可安全执行”。
+`false`，防止把“可分析”误写成“可安全执行”。实际运行必须另外构造 `AstrBotPluginProcess` 并显式传入
+`allow_execution=True`。
+
+## 最小运行桥
+
+基础兼容插件在独立 Python Worker 中运行：
+
+```text
+InboundMessage
+  -> JSON request + request_id
+  -> AstrBot Worker
+  -> AstrMessageEvent
+  -> AstrBotHandlerDescriptor filters
+  -> async handler / async generator
+  -> MessageEventResult
+  -> JSON response
+  -> OutboundMessage
+```
+
+Worker 提供最小 `Star`、`Context`、`AstrMessageEvent`、`MessageEventResult`、`filter` 和 `register`
+外观，因此官方 helloworld 风格插件无需修改 import。插件 stdout/stderr 与协议通道分离，Unicode 通过
+ASCII JSON 转义跨越 Windows 代码页；请求超时会终止 Worker。
+
+独立进程是故障边界，不是安全沙箱。插件仍继承当前用户的文件和网络权限，所以未经信任的插件不能仅凭
+静态检查结果执行。下一阶段需要权限清单和受限进程环境。
 
 ## 推荐实现顺序
 
-1. 把基础 command 和过滤器编译为 EchoWeave Handler Descriptor；
-2. 提供最小 `AstrMessageEvent`、`MessageEventResult`、`Star`、`Context` 兼容外观；
-3. 用 Runtime Host 管理插件初始化与 `terminate()`；
-4. 增加插件权限清单、独立进程与超时/故障隔离；
-5. 通过真实开源插件样本建立兼容回归集，再扩大 API 面。
+1. 增加插件权限清单和受限进程环境；
+2. 映射消息组件以及 `event.send()` 的主动发送语义；
+3. 映射 LLM/Tool Hooks，保持 EchoWeave Hook 的结构化结果；
+4. 通过更多真实开源插件样本建立兼容回归集，再扩大 API 面；
+5. 最后评估 Plugin Pages 和 Web API，不让插件直接共享管理端权限。
 
 ## 官方依据
 
