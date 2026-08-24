@@ -64,6 +64,7 @@ EchoWeave
 - SSE：提供运行事件流，便于仪表盘或调试客户端订阅。
 - 统一事件协议：消息、附件和 Runtime 事件共享版本化契约，事件 ID 与 SSE 续传游标相互独立。
 - Runtime Host：统一管理运行组件的启动、逆序关闭和启动失败回滚；Web Gateway 已完成接入。
+- AstrBot 兼容入口：安全分析插件 Manifest、配置、Skills 和 API 使用，未审查代码不会在扫描阶段执行。
 - Docker Compose：包含 EchoWeave + PostgreSQL + pgvector 的部署形态。
 
 ## 快速启动
