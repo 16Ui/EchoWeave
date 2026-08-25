@@ -107,6 +107,7 @@ class ToolInvocationLedger:
         tool_name: str,
         tool_input: Any,
         effect: ToolEffect,
+        batch: dict[str, Any] | None = None,
     ) -> InvocationDecision:
         session_id = self.session_store.read_header(session_path).id
         identity = build_invocation_identity(session_id, turn_id, tool_call_id)
@@ -136,6 +137,7 @@ class ToolInvocationLedger:
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     effect=effect,
+                    batch=batch,
                     reason=reason,
                 )
                 return InvocationDecision(
@@ -162,6 +164,7 @@ class ToolInvocationLedger:
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     effect=effect,
+                    batch=batch,
                     attempt=attempt,
                     outcome=normalized_outcome,
                 )
@@ -198,6 +201,7 @@ class ToolInvocationLedger:
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     effect=effect,
+                    batch=batch,
                     attempt=attempt,
                     outcome=normalized_outcome,
                     manual_resolution=True,
@@ -224,6 +228,7 @@ class ToolInvocationLedger:
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     effect=effect,
+                    batch=batch,
                     reason=reason,
                 )
                 return InvocationDecision(
@@ -243,6 +248,7 @@ class ToolInvocationLedger:
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     effect=effect,
+                    batch=batch,
                     reason=reason,
                 )
                 return InvocationDecision(
@@ -267,6 +273,7 @@ class ToolInvocationLedger:
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     effect=effect,
+                    batch=batch,
                     attempt=max(attempts),
                     reason=reason,
                 )
@@ -292,6 +299,7 @@ class ToolInvocationLedger:
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 effect=effect,
+                batch=batch,
                 attempt=attempt,
                 replay_after_interruption=bool(attempts),
                 manual_retry=retry_authorized,
@@ -309,25 +317,30 @@ class ToolInvocationLedger:
         tool_call_id: str,
         tool_name: str,
         outcome: dict[str, Any],
+        batch: dict[str, Any] | None = None,
     ) -> None:
         if decision.action != "execute":
             return
         with self._lock:
-            self._append_decision(
-                session_path,
-                "tool.invocation_completed",
-                invocation_key=decision.invocation_key,
-                identity=decision.identity,
-                fingerprint=decision.fingerprint,
-                turn_id=turn_id,
-                trace_id=trace_id,
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                effect=decision.effect,
-                attempt=decision.attempt,
-                outcome=sanitize_value(outcome),
-            )
-            self._in_flight.discard(decision.invocation_key)
+            try:
+                self._append_decision(
+                    session_path,
+                    "tool.invocation_completed",
+                    invocation_key=decision.invocation_key,
+                    identity=decision.identity,
+                    fingerprint=decision.fingerprint,
+                    turn_id=turn_id,
+                    trace_id=trace_id,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    effect=decision.effect,
+                    batch=batch,
+                    attempt=decision.attempt,
+                    outcome=sanitize_value(outcome),
+                )
+            finally:
+                # The external call has returned even when durable persistence fails.
+                self._in_flight.discard(decision.invocation_key)
 
     def resolve(
         self,
@@ -379,6 +392,15 @@ class ToolInvocationLedger:
                 "actor": actor,
                 "note": note,
             }
+            if base.get("batch_id") is not None:
+                payload.update(
+                    {
+                        "batch_id": base.get("batch_id"),
+                        "batch_sequence": base.get("batch_sequence"),
+                        "batch_size": base.get("batch_size"),
+                        "batch_index": base.get("batch_index"),
+                    }
+                )
             if normalized_outcome is not None:
                 payload["outcome"] = normalized_outcome
             if action is InvocationResolution.ALLOW_RETRY:
@@ -441,6 +463,10 @@ class ToolInvocationLedger:
                     "tool_name": latest_started.get("tool_name"),
                     "effect": latest_started.get("effect"),
                     "attempt": latest_started.get("attempt"),
+                    "batch_id": latest_started.get("batch_id"),
+                    "batch_sequence": latest_started.get("batch_sequence"),
+                    "batch_size": latest_started.get("batch_size"),
+                    "batch_index": latest_started.get("batch_index"),
                     "reason": blocked.get("reason") if blocked else "durable completion is missing",
                     "resolution": resolution_value,
                     "authorized_attempt": authorized_attempt,
@@ -503,6 +529,7 @@ class ToolInvocationLedger:
         replay_after_interruption: bool = False,
         manual_retry: bool = False,
         manual_resolution: bool = False,
+        batch: dict[str, Any] | None = None,
     ) -> None:
         payload: dict[str, Any] = {
             "invocation_key": invocation_key,
@@ -526,4 +553,13 @@ class ToolInvocationLedger:
             payload["manual_retry"] = True
         if manual_resolution:
             payload["manual_resolution"] = True
+        if isinstance(batch, dict):
+            payload.update(
+                {
+                    "batch_id": batch.get("id"),
+                    "batch_sequence": batch.get("sequence"),
+                    "batch_size": batch.get("size"),
+                    "batch_index": batch.get("index"),
+                }
+            )
         self.session_store.append(session_path, event_type, payload)

@@ -25,6 +25,7 @@ from echoweave_runtime.runtime.observer import NullRuntimeObserver, RuntimeEvent
 from echoweave_runtime.session.schema import sanitize_value
 from echoweave_runtime.session.store import SessionStore
 from echoweave_runtime.session.summary import build_compaction_summary, build_summary
+from echoweave_runtime.tool_batches import ToolBatchConflictError, ToolBatchLedger
 from echoweave_runtime.tool_invocations import (
     ToolEffect,
     ToolInvocationBlockedError,
@@ -455,6 +456,7 @@ class AgentSessionRuntime:
         self.provider_capabilities = provider_capabilities
         self.retrieval_enabled = retrieval_enabled
         self.provider_reliability = ProviderReliabilityController(provider_reliability_config)
+        self.tool_batch_ledger = ToolBatchLedger(session_store)
         self.tool_invocation_ledger = ToolInvocationLedger(session_store)
         self._active_turn_id: str | None = None
         self._active_trace_id: str | None = None
@@ -516,6 +518,7 @@ class AgentSessionRuntime:
         tool_name: str,
         tool_input: Any,
         tool: Any,
+        batch: dict[str, Any] | None = None,
     ) -> Any:
         turn_id = self._active_turn_id or "unscoped-turn"
         decision = self.tool_invocation_ledger.prepare(
@@ -526,6 +529,7 @@ class AgentSessionRuntime:
             tool_name=tool_name,
             tool_input=tool_input,
             effect=resolve_tool_effect(tool_name, tool, tool_input),
+            batch=batch,
         )
         if decision.action == "reuse":
             outcome = decision.outcome or {}
@@ -556,6 +560,7 @@ class AgentSessionRuntime:
                     tool_call_id=tool_id,
                     tool_name=tool_name,
                     outcome={"status": "error", "error": f"{type(exc).__name__}: {exc}"},
+                    batch=batch,
                 )
             except Exception as persist_error:
                 raise ToolInvocationPersistenceError(
@@ -572,6 +577,7 @@ class AgentSessionRuntime:
                 tool_call_id=tool_id,
                 tool_name=tool_name,
                 outcome={"status": "ok", "content": normalized},
+                batch=batch,
             )
         except Exception as persist_error:
             raise ToolInvocationPersistenceError(
@@ -1230,6 +1236,7 @@ class AgentSessionRuntime:
         )
 
         final_text = ""
+        tool_batch_sequence = 0
         while True:
             truncated_history = truncate_history(history)
             retrieved_chunks: list[RetrievalChunk] = []
@@ -1829,8 +1836,39 @@ class AgentSessionRuntime:
                 self.emit(session_id, "turn_end", {"turn": {"reply": final_text, "summary": summary}})
                 return final_text, history, summary
 
-            tool_batch_id = str(uuid4())
+            tool_batch_sequence += 1
             tool_batch_size = len(final_tool_calls)
+            batch_decision = None
+
+            def _emit_tool_batch_event(event_type: str, payload: dict[str, Any]) -> None:
+                self.emit(session_id, event_type, {"batch": payload})
+
+            if self.tool_execution_mode == "parallel":
+                batch_decision = self.tool_batch_ledger.prepare(
+                    session_path,
+                    turn_id=self._active_turn_id or "unscoped-turn",
+                    trace_id=self._active_trace_id,
+                    sequence=tool_batch_sequence,
+                    mode=self.tool_execution_mode,
+                    members=[
+                        {
+                            "index": index,
+                            "id": str(tool_call.get("id") or ""),
+                            "name": str(tool_call.get("name") or ""),
+                            "input": sanitize_value(tool_call.get("input") or {}),
+                        }
+                        for index, tool_call in enumerate(final_tool_calls, start=1)
+                    ],
+                    on_event=_emit_tool_batch_event,
+                )
+                tool_batch_id = batch_decision.batch_key
+                if batch_decision.action == "conflict":
+                    raise ToolBatchConflictError(
+                        batch_decision.batch_key,
+                        batch_decision.reason or "batch fingerprint changed",
+                    )
+            else:
+                tool_batch_id = str(uuid4())
 
             if self.tool_execution_mode == "parallel":
                 pending_parallel_calls: list[dict[str, Any]] = []
@@ -1840,6 +1878,7 @@ class AgentSessionRuntime:
                     tool_name: str,
                     tool_input: Any,
                     tool: Any,
+                    tool_index: int,
                 ) -> dict[str, Any]:
                     try:
                         result = self._execute_tool_with_ledger(
@@ -1848,6 +1887,12 @@ class AgentSessionRuntime:
                             tool_name=tool_name,
                             tool_input=tool_input,
                             tool=tool,
+                            batch={
+                                "id": tool_batch_id,
+                                "sequence": tool_batch_sequence,
+                                "size": tool_batch_size,
+                                "index": tool_index,
+                            },
                         )
                     except Exception as exc:
                         if isinstance(exc, ToolInvocationPersistenceError) or (
@@ -1866,14 +1911,27 @@ class AgentSessionRuntime:
                         "content": sanitize_value(result),
                     }
 
-                def _finalize_parallel_tool_call(entry: dict[str, Any], execution_outcome: dict[str, Any]) -> None:
+                def _finalize_parallel_tool_call(
+                    entry: dict[str, Any],
+                    execution_outcome: dict[str, Any],
+                ) -> dict[str, Any]:
                     tool_id = str(entry["tool_id"])
                     tool_name = str(entry["tool_name"])
                     tool_input = sanitize_value(entry["tool_input"])
                     tool_index = int(entry["tool_index"])
 
                     if execution_outcome.get("status") == "blocked":
-                        raise ToolInvocationBlockedError(str(execution_outcome.get("error", "tool invocation blocked")))
+                        blocked_reason = str(execution_outcome.get("error", "tool invocation blocked"))
+                        if batch_decision is not None:
+                            self.tool_batch_ledger.suspend(
+                                session_path,
+                                batch_decision,
+                                trace_id=self._active_trace_id,
+                                reason=blocked_reason,
+                                blocked_tool_call_id=tool_id,
+                                on_event=_emit_tool_batch_event,
+                            )
+                        raise ToolInvocationBlockedError(blocked_reason)
 
                     if execution_outcome.get("status") == "error":
                         error_message = sanitize_value(str(execution_outcome.get("error", "unknown tool error")))
@@ -2058,6 +2116,14 @@ class AgentSessionRuntime:
 
                     history.append(tool_message)
                     self.session_store.append(session_path, "message", tool_message)
+                    return {
+                        "index": tool_index,
+                        "tool_call_id": tool_id,
+                        "tool_name": tool_name,
+                        "status": "error"
+                        if bool(tool_message["content"][0].get("is_error"))
+                        else "ok",
+                    }
 
                 for tool_index, tool_call_data in enumerate(final_tool_calls, start=1):
                     tool_id = str(tool_call_data["id"])
@@ -2091,6 +2157,12 @@ class AgentSessionRuntime:
                                 "id": tool_id,
                                 "name": tool_name,
                                 "input": tool_input,
+                                "mode": self.tool_execution_mode,
+                                "tool_execution_mode": self.tool_execution_mode,
+                                "batch_id": tool_batch_id,
+                                "batch_sequence": tool_batch_sequence,
+                                "batch_size": tool_batch_size,
+                                "batch_index": tool_index,
                                 "turn_id": self._active_turn_id,
                                 "trace_id": self._active_trace_id,
                             },
@@ -2188,8 +2260,10 @@ class AgentSessionRuntime:
                     "parallel.plan",
                     {"parallel": {"mode": plan_mode, "reason": plan_reason, "batch_id": tool_batch_id}},
                 )
+                batch_results: list[dict[str, Any]] = []
                 future_by_index: dict[int, Any] = {}
                 if runnable_calls and plan_mode == "parallel":
+                    execution_outcomes_by_index: dict[int, dict[str, Any]] = {}
                     with ThreadPoolExecutor(max_workers=len(runnable_calls)) as executor:
                         for entry in runnable_calls:
                             tool_index = int(entry["tool_index"])
@@ -2199,6 +2273,7 @@ class AgentSessionRuntime:
                                 str(entry["tool_name"]),
                                 sanitize_value(entry["tool_input"]),
                                 entry["tool"],
+                                tool_index,
                             )
 
                         for entry in pending_parallel_calls:
@@ -2224,7 +2299,15 @@ class AgentSessionRuntime:
                                             "status": "error",
                                             "error": sanitize_value(f"{type(exc).__name__}: {exc}"),
                                         }
-                            _finalize_parallel_tool_call(entry, execution_outcome)
+                            execution_outcomes_by_index[tool_index] = execution_outcome
+                    for entry in pending_parallel_calls:
+                        tool_index = int(entry["tool_index"])
+                        batch_results.append(
+                            _finalize_parallel_tool_call(
+                                entry,
+                                execution_outcomes_by_index[tool_index],
+                            )
+                        )
                 else:
                     for entry in pending_parallel_calls:
                         setup_error = entry.get("setup_error")
@@ -2239,13 +2322,23 @@ class AgentSessionRuntime:
                                 str(entry["tool_name"]),
                                 sanitize_value(entry["tool_input"]),
                                 entry["tool"],
+                                int(entry["tool_index"]),
                             )
                         else:
                             execution_outcome = {
                                 "status": "error",
                                 "error": sanitize_value("RuntimeError: unresolved parallel tool call"),
                             }
-                        _finalize_parallel_tool_call(entry, execution_outcome)
+                        batch_results.append(_finalize_parallel_tool_call(entry, execution_outcome))
+
+                if batch_decision is not None:
+                    self.tool_batch_ledger.complete(
+                        session_path,
+                        batch_decision,
+                        trace_id=self._active_trace_id,
+                        results=batch_results,
+                        on_event=_emit_tool_batch_event,
+                    )
 
                 continue
 

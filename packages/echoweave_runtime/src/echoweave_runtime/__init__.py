@@ -9,6 +9,11 @@ from echoweave_runtime.lifecycle import (
 )
 from echoweave_runtime.events import AgentEvent, Attachment, EventTypes, InboundMessage, OutboundMessage
 from echoweave_runtime.tool_invocations import InvocationResolution, ToolEffect, ToolInvocationLedger
+from echoweave_runtime.tool_batches import (
+    ToolBatchConflictError,
+    ToolBatchDecision,
+    ToolBatchLedger,
+)
 from echoweave_runtime.provider_reliability import (
     CircuitBreakerPolicy,
     CircuitState,
@@ -35,6 +40,9 @@ __all__ = [
     "ToolEffect",
     "ToolInvocationLedger",
     "InvocationResolution",
+    "ToolBatchConflictError",
+    "ToolBatchDecision",
+    "ToolBatchLedger",
     "CircuitBreakerPolicy",
     "CircuitState",
     "ProviderCircuitOpenError",

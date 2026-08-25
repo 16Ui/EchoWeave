@@ -41,12 +41,13 @@ EchoWeave 的主线是可扩展的个人 Agent Runtime。实习经验只用于�
 
 - 仓库级上下文构建和结构化任务状态；
 - 受控文件修改、Shell、测试和 Git 工具；
-- [进行中] 高风险审批、Checkpoint、Resume 与失败恢复：已完成起始 checkpoint、可恢复 Turn、Tool Invocation 幂等账本、受控恢复、indeterminate 人工处置和 Provider 可靠性层，下一步为并行批次部分恢复；
+- [进行中] 高风险审批、Checkpoint、Resume 与失败恢复：已完成 checkpoint、可恢复 Turn、Invocation/Batch 双层账本、受控恢复、人工处置和 Provider 可靠性层，下一步为进程重启后的执行接管；
 - 轨迹级 Eval 和可复现软件修复任务集。
 
 ## M5：可靠性与公开证据
 
 - [已完成首个切片] Provider timeout/retry budget/backoff/Retry-After/stream boundary/circuit breaker 契约；
 - [进行中] 插件和 Provider 故障注入：Provider 单元与 Runtime 集成路径已覆盖；
+- [已完成首个切片] 并行工具批次部分完成、durable reuse、安全重试与成员冲突故障注入；
 - Golden Set、回归阈值和 CI 门禁；
 - 架构说明、演示视频和性能/可靠性报告。

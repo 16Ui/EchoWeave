@@ -548,6 +548,12 @@ class SessionStore:
             "tool_invocation_reuse_count": sum(1 for event in events if event.type == "tool.invocation_reused"),
             "tool_invocation_blocked_count": sum(1 for event in events if event.type == "tool.invocation_blocked"),
             "tool_invocation_resolution_count": sum(1 for event in events if event.type == "tool.invocation_resolved"),
+            "tool_batch_started_count": sum(1 for event in events if event.type == "tool.batch_started"),
+            "tool_batch_resumed_count": sum(1 for event in events if event.type == "tool.batch_resumed"),
+            "tool_batch_replayed_count": sum(1 for event in events if event.type == "tool.batch_replayed"),
+            "tool_batch_completed_count": sum(1 for event in events if event.type == "tool.batch_completed"),
+            "tool_batch_suspended_count": sum(1 for event in events if event.type == "tool.batch_suspended"),
+            "tool_batch_conflict_count": sum(1 for event in events if event.type == "tool.batch_conflict"),
             "recovery_attempt_count": sum(1 for event in events if event.type == "turn.recovery_started"),
             "provider_retry_count": sum(1 for event in events if event.type == "provider.retry_scheduled"),
             "provider_retry_exhausted_count": sum(

@@ -30,7 +30,7 @@ from echoweave_runtime.app import build_runtime
 from echoweave_runtime.governance import record_runtime_audit
 from echoweave_runtime.runtime.agent_session import AgentSessionRuntime
 from echoweave_runtime.session.store import SessionStore
-from echoweave_runtime.tool_invocations import InvocationResolution
+from echoweave_runtime.tool_invocations import InvocationResolution, ToolEffect
 
 
 class AgentCore:
@@ -645,7 +645,7 @@ class AgentCore:
 
     @staticmethod
     def _suspension_is_resolved(events: list[Any], turn_id: str) -> bool:
-        started: dict[str, int] = {}
+        started: dict[str, tuple[int, dict[str, Any]]] = {}
         completed: set[str] = set()
         resolved: dict[str, int] = {}
         for index, event in enumerate(events):
@@ -655,14 +655,17 @@ class AgentCore:
             if not key:
                 continue
             if event.type == "tool.invocation_started":
-                started[key] = index
+                started[key] = (index, event.payload)
             elif event.type == "tool.invocation_completed":
                 completed.add(key)
             elif event.type == "tool.invocation_resolved":
                 resolved[key] = index
-        indeterminate = {key: index for key, index in started.items() if key not in completed}
-        return bool(indeterminate) and all(
-            resolved.get(key, -1) > index for key, index in indeterminate.items()
+        incomplete = {key: value for key, value in started.items() if key not in completed}
+        return bool(incomplete) and all(
+            resolved.get(key, -1) > index
+            or str(payload.get("effect") or ToolEffect.UNKNOWN.value)
+            in {ToolEffect.READ_ONLY.value, ToolEffect.IDEMPOTENT_WRITE.value}
+            for key, (index, payload) in incomplete.items()
         )
 
 
