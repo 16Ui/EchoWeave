@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import Any
 
 from echoweave_agent_core.types import TurnResult
+from echoweave_runtime.concurrency import FileLockTimeoutError
+from echoweave_runtime.execution_leases import (
+    ExecutionLeaseCorruptError,
+    ExecutionLeaseLostError,
+    ExecutionLeaseUnavailableError,
+)
 from echoweave_runtime.provider_reliability import (
     ProviderCircuitOpenError,
     is_retryable_provider_error,
@@ -89,6 +95,7 @@ class TurnFailureKind(str, Enum):
     SESSION = "session"
     PERSISTENCE = "persistence"
     CHECKPOINT = "checkpoint"
+    CONCURRENCY = "concurrency"
     HOOK = "hook"
     PROVIDER = "provider"
     RUNTIME = "runtime"
@@ -196,6 +203,17 @@ def classify_turn_failure(error: BaseException, stage: str) -> TurnFailure:
     elif isinstance(error, ToolInvocationBlockedError):
         kind = TurnFailureKind.INDETERMINATE_TOOL
         retryable = False
+    elif isinstance(
+        error,
+        (
+            ExecutionLeaseUnavailableError,
+            ExecutionLeaseLostError,
+            ExecutionLeaseCorruptError,
+            FileLockTimeoutError,
+        ),
+    ):
+        kind = TurnFailureKind.CONCURRENCY
+        retryable = True
     elif stage == "session":
         kind = TurnFailureKind.SESSION
         retryable = False
@@ -222,6 +240,19 @@ def classify_turn_failure(error: BaseException, stage: str) -> TurnFailure:
         details = {
             "provider_key": error.provider_key,
             "retry_after_seconds": error.retry_after_seconds,
+        }
+    elif isinstance(error, ExecutionLeaseUnavailableError):
+        details = {
+            "owner_id": error.current.owner_id,
+            "fencing_token": error.current.fencing_token,
+            "retry_after_seconds": error.retry_after_seconds,
+        }
+    elif isinstance(error, ExecutionLeaseLostError):
+        details = {
+            "expected_owner_id": error.lease.owner_id,
+            "expected_fencing_token": error.lease.fencing_token,
+            "current_owner_id": error.current.owner_id if error.current else None,
+            "current_fencing_token": error.current.fencing_token if error.current else None,
         }
     return TurnFailure(
         kind=kind,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -14,6 +15,7 @@ from echoweave_runtime.context.prompt_builder import (
 from echoweave_runtime.context.truncation import trim_for_compaction, truncate_history
 from echoweave_runtime.extensions.base import ExtensionContext, MemoryChunk, RetrievalChunk
 from echoweave_runtime.extensions.manager import ExtensionManager
+from echoweave_runtime.execution_leases import ExecutionLeaseLostError
 from echoweave_runtime.governance import record_runtime_audit
 from echoweave_runtime.models.base import ModelClient, StreamOptions
 from echoweave_runtime.models.factory import ProviderCapabilities
@@ -519,8 +521,11 @@ class AgentSessionRuntime:
         tool_input: Any,
         tool: Any,
         batch: dict[str, Any] | None = None,
+        execution_guard: Callable[[], Any] | None = None,
     ) -> Any:
         turn_id = self._active_turn_id or "unscoped-turn"
+        if execution_guard is not None:
+            execution_guard()
         decision = self.tool_invocation_ledger.prepare(
             session_path,
             turn_id=turn_id,
@@ -549,7 +554,12 @@ class AgentSessionRuntime:
                 getattr(tool, "input_schema", None),
                 tool,
             )
+            if execution_guard is not None:
+                execution_guard()
             result = tool.execute(tool_input)
+        except ExecutionLeaseLostError:
+            # A stale owner must stop immediately; do not turn fencing into a tool result.
+            raise
         except Exception as exc:
             try:
                 self.tool_invocation_ledger.complete(
@@ -661,6 +671,7 @@ class AgentSessionRuntime:
         batch_size: int,
         batch_index: int,
         stop_on_blocked_tool: bool = False,
+        execution_guard: Callable[[], Any] | None = None,
     ) -> dict[str, Any]:
         if tool_name not in _STREAMING_EAGER_SAFE_TOOLS:
             return {"status": "deferred", "reason": "tool is not safe for eager streaming execution"}
@@ -740,8 +751,11 @@ class AgentSessionRuntime:
                 tool_name=tool_name,
                 tool_input=tool_input,
                 tool=tool,
+                execution_guard=execution_guard,
             )
         except Exception as exc:
+            if isinstance(exc, ExecutionLeaseLostError):
+                raise
             if isinstance(exc, ToolInvocationPersistenceError) or (
                 stop_on_blocked_tool and isinstance(exc, ToolInvocationBlockedError)
             ):
@@ -1140,6 +1154,7 @@ class AgentSessionRuntime:
         turn_id: str | None = None,
         trace_id: str | None = None,
         stop_on_blocked_tool: bool = False,
+        execution_guard: Callable[[], Any] | None = None,
     ) -> tuple[str, list[dict[str, Any]], str | None]:
         """
         执行单轮对话主链。
@@ -1154,6 +1169,8 @@ class AgentSessionRuntime:
         session_state = self.session_store.load_snapshot(session_path)
         session_id = session_state.header.id
         self._begin_turn_context(turn_id=turn_id, trace_id=trace_id)
+        if execution_guard is not None:
+            execution_guard()
         provider_retry_budget = self.provider_reliability.new_budget()
         user_message = {"role": "user", "content": sanitize_value(user_input)}
         history = [*history, user_message]
@@ -1238,6 +1255,8 @@ class AgentSessionRuntime:
         final_text = ""
         tool_batch_sequence = 0
         while True:
+            if execution_guard is not None:
+                execution_guard()
             truncated_history = truncate_history(history)
             retrieved_chunks: list[RetrievalChunk] = []
             retrieval_query = str(user_message["content"])
@@ -1579,6 +1598,8 @@ class AgentSessionRuntime:
                 }
             )
             try:
+                if execution_guard is not None:
+                    execution_guard()
                 if call_path == "stream":
                     stream_method = getattr(self.model_client, "stream")
                     stream_events = self.provider_reliability.stream(
@@ -1718,6 +1739,7 @@ class AgentSessionRuntime:
                                 batch_size=0,
                                 batch_index=len(streamed_tool_calls),
                                 stop_on_blocked_tool=stop_on_blocked_tool,
+                                execution_guard=execution_guard,
                             )
                     elif event_type == "message_error":
                         raise RuntimeError(str(payload.get("error", "model stream failed")))
@@ -1893,7 +1915,10 @@ class AgentSessionRuntime:
                                 "size": tool_batch_size,
                                 "index": tool_index,
                             },
+                            execution_guard=execution_guard,
                         )
+                    except ExecutionLeaseLostError:
+                        raise
                     except Exception as exc:
                         if isinstance(exc, ToolInvocationPersistenceError) or (
                             stop_on_blocked_tool and isinstance(exc, ToolInvocationBlockedError)
@@ -2294,6 +2319,8 @@ class AgentSessionRuntime:
                                 else:
                                     try:
                                         execution_outcome = sanitize_value(future.result())
+                                    except ExecutionLeaseLostError:
+                                        raise
                                     except Exception as exc:
                                         execution_outcome = {
                                             "status": "error",
@@ -2478,8 +2505,11 @@ class AgentSessionRuntime:
                         tool_name=tool_name,
                         tool_input=tool_input,
                         tool=tool,
+                        execution_guard=execution_guard,
                     )
                 except Exception as exc:
+                    if isinstance(exc, ExecutionLeaseLostError):
+                        raise
                     if isinstance(exc, ToolInvocationPersistenceError) or (
                         stop_on_blocked_tool and isinstance(exc, ToolInvocationBlockedError)
                     ):

@@ -73,12 +73,15 @@ EchoWeave
 - 人工恢复决策：支持补录工具结果、一次性授权重试或放弃 Turn，并保留操作者与原因审计。
 - Provider 可靠性层：单请求指数退避、Turn 级共享重试预算、`Retry-After`、流式安全边界和进程内熔断状态机。
 - 并行批次恢复：稳定批次身份、成员指纹校验、部分完成摘要，以及 safe retry / durable reuse / indeterminate suspend 分流。
+- 执行所有权：跨进程可过期 Lease、后台 heartbeat、单调 fencing token 与 stale owner 拦截，支持重启后的安全接管。
+- 并发基础设施：只读工具线程池、Session JSONL 的进程内/跨进程双层锁、按 Store 协调器单例和进程级心跳调度单例。
 - Docker Compose：包含 EchoWeave + PostgreSQL + pgvector 的部署形态。
 
 可恢复执行的当前边界和后续幂等设计见
 [docs/RECOVERABLE_AGENT_RUNTIME.md](docs/RECOVERABLE_AGENT_RUNTIME.md)，Provider 故障处理契约见
 [docs/PROVIDER_RELIABILITY.md](docs/PROVIDER_RELIABILITY.md)，并行批次恢复见
-[docs/PARALLEL_BATCH_RECOVERY.md](docs/PARALLEL_BATCH_RECOVERY.md)。
+[docs/PARALLEL_BATCH_RECOVERY.md](docs/PARALLEL_BATCH_RECOVERY.md)，并发与接管设计见
+[docs/CONCURRENCY_AND_TAKEOVER.md](docs/CONCURRENCY_AND_TAKEOVER.md)。
 
 ## 快速启动
 

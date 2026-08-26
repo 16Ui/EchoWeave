@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from echoweave_runtime.extensions.manager import ExtensionManager
+from echoweave_runtime.execution_leases import ExecutionLeaseConfig
 from echoweave_runtime.models.base import ModelClient
 from echoweave_runtime.models.factory import ProviderCapabilities
 from echoweave_runtime.provider_reliability import ProviderReliabilityConfig
@@ -28,6 +29,8 @@ class AgentCoreConfig:
     provider_capabilities: ProviderCapabilities | None = None
     retrieval_enabled: bool = True
     provider_reliability: ProviderReliabilityConfig = field(default_factory=ProviderReliabilityConfig)
+    execution_lease: ExecutionLeaseConfig = field(default_factory=ExecutionLeaseConfig)
+    execution_owner_id: str | None = None
     hooks: tuple[Any, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 

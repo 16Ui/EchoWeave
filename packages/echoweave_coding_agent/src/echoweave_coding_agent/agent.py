@@ -15,6 +15,7 @@ from echoweave_agent_core import (
     TurnResult,
 )
 from echoweave_runtime.app import build_registry
+from echoweave_runtime.execution_leases import ExecutionLeaseConfig
 from echoweave_runtime.extensions.manager import ExtensionManager, build_extension_manager
 from echoweave_runtime.models.base import ModelClient
 from echoweave_runtime.models.factory import ProviderCapabilities
@@ -38,6 +39,8 @@ class CodingAgentConfig:
     provider_capabilities: ProviderCapabilities | None = None
     retrieval_enabled: bool = True
     provider_reliability: ProviderReliabilityConfig = field(default_factory=ProviderReliabilityConfig)
+    execution_lease: ExecutionLeaseConfig = field(default_factory=ExecutionLeaseConfig)
+    execution_owner_id: str | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -72,6 +75,8 @@ class CodingAgent:
                 provider_capabilities=config.provider_capabilities,
                 retrieval_enabled=config.retrieval_enabled,
                 provider_reliability=config.provider_reliability,
+                execution_lease=config.execution_lease,
+                execution_owner_id=config.execution_owner_id,
                 metadata={"workspace": str(workspace), **(config.metadata or {})},
             )
         )

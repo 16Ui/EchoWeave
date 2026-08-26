@@ -75,6 +75,7 @@ tool.batch_completed -- Turn 后续失败并恢复 ------> tool.batch_replayed
 ## 当前边界
 
 - Batch ledger 与 Invocation ledger 都使用 session append-only JSONL，单进程内由锁保护；
-- 目前没有跨进程 lease，两个进程不能同时接管同一未终止 Turn；
+- Logical Turn 由跨进程 Execution Lease 和 fencing token 限制为单 owner；
+- 线程池只负责同一 owner 内的只读成员并发，不改变 Lease 所有权；
 - 外部副作用与本地 completion event 之间仍不存在分布式事务；
 - Provider 必须在恢复时保持批次逻辑位置和成员内容一致，否则恢复会安全失败。

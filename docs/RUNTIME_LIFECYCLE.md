@@ -3,6 +3,8 @@
 EchoWeave 使用 `RuntimeHost` 统一管理长生命周期资源。首个接入组件是 Web Gateway，后续 Channel、
 Provider 和 Plugin 应沿用同一协议，不再由各入口自行拼接清理逻辑。
 
+Execution Lease heartbeat 由进程内唯一调度线程统一维护，而不是每个 Turn 创建一个线程。协调器按 SessionStore root 复用；它们属于并发基础设施，不代表跨进程的唯一 owner。跨进程所有权只由持久化 Lease 和 fencing token 决定。
+
 ## 生命周期契约
 
 受管组件只需要提供稳定且唯一的 `name`，以及同步的 `start()`、`stop()` 方法：

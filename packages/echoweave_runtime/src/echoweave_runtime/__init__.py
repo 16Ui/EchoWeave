@@ -7,6 +7,14 @@ from echoweave_runtime.lifecycle import (
     RuntimeShutdownError,
     RuntimeStartupError,
 )
+from echoweave_runtime.execution_leases import (
+    ExecutionLease,
+    ExecutionLeaseConfig,
+    ExecutionLeaseCoordinator,
+    ExecutionLeaseCorruptError,
+    ExecutionLeaseLostError,
+    ExecutionLeaseUnavailableError,
+)
 from echoweave_runtime.events import AgentEvent, Attachment, EventTypes, InboundMessage, OutboundMessage
 from echoweave_runtime.tool_invocations import InvocationResolution, ToolEffect, ToolInvocationLedger
 from echoweave_runtime.tool_batches import (
@@ -32,6 +40,12 @@ __all__ = [
     "RuntimeLifecycleError",
     "RuntimeShutdownError",
     "RuntimeStartupError",
+    "ExecutionLease",
+    "ExecutionLeaseConfig",
+    "ExecutionLeaseCoordinator",
+    "ExecutionLeaseCorruptError",
+    "ExecutionLeaseLostError",
+    "ExecutionLeaseUnavailableError",
     "AgentEvent",
     "Attachment",
     "EventTypes",

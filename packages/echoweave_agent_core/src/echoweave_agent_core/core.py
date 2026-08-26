@@ -27,6 +27,10 @@ from echoweave_agent_core.types import (
     TurnResult,
 )
 from echoweave_runtime.app import build_runtime
+from echoweave_runtime.execution_leases import (
+    ExecutionLease,
+    ExecutionLeaseCoordinator,
+)
 from echoweave_runtime.governance import record_runtime_audit
 from echoweave_runtime.runtime.agent_session import AgentSessionRuntime
 from echoweave_runtime.session.store import SessionStore
@@ -47,11 +51,13 @@ class AgentCore:
         *,
         hooks: tuple[Any, ...] = (),
         metadata: dict[str, Any] | None = None,
+        execution_leases: ExecutionLeaseCoordinator | None = None,
     ) -> None:
         self.runtime = runtime
         self.session_store = session_store
         self.hooks = hooks
         self.metadata = metadata or {}
+        self.execution_leases = execution_leases or ExecutionLeaseCoordinator.for_store(session_store)
 
     @classmethod
     def from_config(cls, config: AgentCoreConfig) -> "AgentCore":
@@ -67,7 +73,18 @@ class AgentCore:
             retrieval_enabled=config.retrieval_enabled,
             provider_reliability_config=config.provider_reliability,
         )
-        return cls(runtime, config.session_store, hooks=config.hooks, metadata=config.metadata)
+        execution_leases = ExecutionLeaseCoordinator.for_store(
+            config.session_store,
+            config.execution_lease,
+            owner_id=config.execution_owner_id,
+        )
+        return cls(
+            runtime,
+            config.session_store,
+            hooks=config.hooks,
+            metadata=config.metadata,
+            execution_leases=execution_leases,
+        )
 
     def run_turn(self, request: TurnRequest) -> TurnResult:
         """Compatibility API: return the result and re-raise the original failure."""
@@ -120,9 +137,26 @@ class AgentCore:
             events,
             turn_id,
         )
-        if latest_state in incomplete_states and not request.allow_incomplete and not resolved_suspension:
+        lease_status = self.execution_leases.inspect(session_path, turn_id)
+        if latest_state in incomplete_states and lease_status.get("state") == "active":
+            retry_after = float(lease_status.get("retry_after_seconds") or 0.0)
             raise ValueError(
-                f"turn is {latest_state}; set allow_incomplete=true only after confirming no active executor remains"
+                f"turn is {latest_state} and still has an active execution lease; "
+                f"retry after {retry_after:.3f}s"
+            )
+        lease_allows_takeover = (
+            latest_state != TurnState.SUSPENDED.value
+            and bool(lease_status.get("takeover_allowed"))
+        )
+        if (
+            latest_state in incomplete_states
+            and not request.allow_incomplete
+            and not resolved_suspension
+            and not lease_allows_takeover
+        ):
+            raise ValueError(
+                f"turn is {latest_state}; no expired execution lease proves the old executor stopped, "
+                "so set allow_incomplete=true only after manual confirmation"
             )
         if latest_state not in incomplete_states | {
             TurnState.FAILED.value,
@@ -301,12 +335,24 @@ class AgentCore:
         checkpoint: dict[str, Any] | None = recovery_checkpoint
         metadata = {**self.metadata, **request.metadata}
         context: CoreTurnContext | None = None
+        execution_lease: ExecutionLease | None = None
         stage = "session"
         try:
             session_path = self._resolve_turn_session(request)
             snapshot = self.session_store.load_snapshot(session_path)
             session_id = snapshot.header.id
             context = CoreTurnContext(session_path=session_path, session_id=session_id, metadata=metadata)
+            stage = "execution_lease"
+            execution_lease = self.execution_leases.acquire(
+                session_path,
+                turn_id=turn_id,
+                trace_id=trace_id,
+            )
+            metadata = {
+                **metadata,
+                "execution_owner_id": execution_lease.owner_id,
+                "fencing_token": execution_lease.fencing_token,
+            }
             stage = "state_persist"
             self._append_turn_state(
                 session_path,
@@ -370,6 +416,7 @@ class AgentCore:
                 turn_id=turn_id,
                 trace_id=trace_id,
                 stop_on_blocked_tool=stop_on_blocked_tool,
+                execution_guard=lambda: self.execution_leases.assert_owned(execution_lease),
             )
 
             result = TurnResult(
@@ -501,6 +548,21 @@ class AgentCore:
                 failure=failure,
                 metadata=metadata,
             )
+        finally:
+            if execution_lease is not None and session_path is not None:
+                try:
+                    released = self.execution_leases.release(
+                        session_path,
+                        execution_lease,
+                        trace_id=trace_id,
+                        reason=machine.state.value,
+                    )
+                    if not released:
+                        metadata["lease_release_skipped"] = "ownership already changed"
+                except Exception as release_error:
+                    metadata["lease_release_failure"] = (
+                        f"{type(release_error).__name__}: {release_error}"
+                    )
 
     def resume(self) -> Path:
         return resolve_session_path(self.session_store, resume=True)

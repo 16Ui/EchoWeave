@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from pathlib import Path
 from typing import Any
 
+from echoweave_runtime.concurrency import InterProcessFileLock, KeyedRLockPool
 from echoweave_runtime.session.schema import SessionHeader, SessionSnapshot, StoredEvent
 from echoweave_runtime.session.tree import SessionTree, SessionTreeNode
 
@@ -14,6 +16,7 @@ class SessionStore:
     def __init__(self, sessions_dir: Path) -> None:
         self.sessions_dir = sessions_dir
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._keyed_locks = KeyedRLockPool()
 
     def _resolve_session_id(self, session_path: Path) -> str | None:
         try:
@@ -54,9 +57,10 @@ class SessionStore:
 
     def append(self, session_path: Path, event_type: str, payload: dict[str, Any]) -> None:
         """以 append-only 方式追加事件，保证会话历史可回放。"""
-        session_id = self._resolve_session_id(session_path)
-        with session_path.open("a", encoding="utf-8") as f:
-            f.write(StoredEvent(type=event_type, payload=payload, session_id=session_id).to_json() + "\n")
+        with self._session_file_lock(session_path):
+            session_id = self._resolve_session_id(session_path)
+            with session_path.open("a", encoding="utf-8") as f:
+                f.write(StoredEvent(type=event_type, payload=payload, session_id=session_id).to_json() + "\n")
 
     def resolve_session_path(self, session: str | Path) -> Path:
         text = str(session).strip()
@@ -114,11 +118,40 @@ class SessionStore:
         return imported_path
 
     def read_events(self, session_path: Path) -> list[StoredEvent]:
-        events: list[StoredEvent] = []
-        for line in session_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                events.append(StoredEvent.from_json(line))
-        return events
+        with self._session_file_lock(session_path):
+            events: list[StoredEvent] = []
+            for line in session_path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    events.append(StoredEvent.from_json(line))
+            return events
+
+    def _session_file_lock(self, session_path: Path):
+        resolved = session_path.expanduser().resolve()
+        digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()
+        local_lock = self._keyed_locks.lock_for(resolved)
+        file_lock = InterProcessFileLock(
+            self.sessions_dir / ".session-locks" / f"{digest}.lock",
+            timeout_seconds=10.0,
+        )
+
+        class _SessionFileLock:
+            def __enter__(self):
+                local_lock.acquire()
+                try:
+                    file_lock.acquire()
+                except BaseException:
+                    local_lock.release()
+                    raise
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
+                try:
+                    file_lock.release()
+                finally:
+                    local_lock.release()
+                return False
+
+        return _SessionFileLock()
 
     def read_header(self, session_path: Path) -> SessionHeader:
         events = self.read_events(session_path)
@@ -555,6 +588,10 @@ class SessionStore:
             "tool_batch_suspended_count": sum(1 for event in events if event.type == "tool.batch_suspended"),
             "tool_batch_conflict_count": sum(1 for event in events if event.type == "tool.batch_conflict"),
             "recovery_attempt_count": sum(1 for event in events if event.type == "turn.recovery_started"),
+            "lease_acquired_count": sum(1 for event in events if event.type == "turn.lease_acquired"),
+            "lease_takeover_count": sum(1 for event in events if event.type == "turn.lease_taken_over"),
+            "lease_rejected_count": sum(1 for event in events if event.type == "turn.lease_rejected"),
+            "lease_lost_count": sum(1 for event in events if event.type == "turn.lease_lost"),
             "provider_retry_count": sum(1 for event in events if event.type == "provider.retry_scheduled"),
             "provider_retry_exhausted_count": sum(
                 1 for event in events if event.type == "provider.retry_exhausted"
