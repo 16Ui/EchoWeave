@@ -8,6 +8,8 @@ from typing import Any
 from echoweave_agent_core import (
     AgentCore,
     AgentCoreConfig,
+    OrphanRecoveryConfig,
+    OrphanRecoveryScheduler,
     RecoverTurnRequest,
     ResolveToolInvocationRequest,
     TurnOutcome,
@@ -116,6 +118,13 @@ class CodingAgent:
 
     def list_sessions(self) -> list[dict[str, Any]]:
         return self.core.list_sessions()
+
+    def build_recovery_scheduler(
+        self,
+        config: OrphanRecoveryConfig | None = None,
+    ) -> OrphanRecoveryScheduler:
+        """Build an opt-in lifecycle component for crashed-turn recovery."""
+        return OrphanRecoveryScheduler(self.core, config)
 
     def create_checkpoint(self, session_path: str | Path, label: str | None = None) -> dict[str, Any]:
         return self.core.create_checkpoint(session_path, label=label)

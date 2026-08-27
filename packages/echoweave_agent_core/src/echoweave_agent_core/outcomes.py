@@ -132,6 +132,10 @@ class TurnExecutionError(RuntimeError):
         self.failure = failure
 
 
+class TurnRecoveryConflictError(ValueError):
+    """Raised when durable Turn state changes while recovery ownership is contested."""
+
+
 @dataclass(frozen=True)
 class TurnOutcome:
     turn_id: str

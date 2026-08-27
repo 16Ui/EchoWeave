@@ -80,7 +80,7 @@ created -> running -> completed
 5. 让 invocation ledger 对模型重新产生的工具调用执行复用、重试或阻断；
 6. 写入 `turn.recovery_started` / `turn.recovery_finished` 作为审计边界。
 
-已完成 Turn 不允许恢复。状态仍为 `running/created/waiting_for_tool/suspended` 的 Turn 默认也不允许恢复；只有操作者确认旧 executor 已不存在后，才能显式设置 `allow_incomplete=True`，避免两个执行器同时推进同一 Turn。
+已完成 Turn 不允许恢复。`running/created/waiting_for_tool` 若仍有 active Lease 会被拒绝，Lease 过期后可以通过更高 fencing token 接管；缺少 Lease 的旧会话仍需操作者显式设置 `allow_incomplete=True`。`suspended` 只有在危险工具状态已经人工处置后才允许继续，避免两个执行器推进同一 Turn，或把未知副作用当成普通失败重试。
 
 恢复期间遇到 indeterminate 工具时，Runtime 不再把它降级成普通 tool error 交给模型继续推理，而是把 attempt 停在 `suspended`，返回 `TurnFailureKind.INDETERMINATE_TOOL`。这保证了“模型回复完成”不会掩盖副作用状态未知的问题。
 
@@ -132,12 +132,13 @@ recovered = core.recover_turn(
 - 批次部分完成后，durable member 复用结果，安全 member 重试，危险 indeterminate member 暂停；
 - 每个 Logical Turn 由可过期 Execution Lease 约束为单 owner，后台 heartbeat 维持续租；
 - `recover_turn()` 可以接管过期 orphan lease，并以递增 fencing token 拒绝恢复运行的旧 owner；
+- 可选 `OrphanRecoveryScheduler` 只扫描 Lease 已过期且仍未完成的 Turn，以固定线程池、in-flight 去重和 attempt 上限执行自动恢复；
+- 恢复调用先 acquire Lease，再写恢复事件，并在持有 Lease 后重新校验状态，避免并发扫描的旧快照重复推进 Turn；
 - 故障注入测试覆盖成功关联、超时、checkpoint 故障、调用冲突、结果复用和中断重放决策。
 
 当前尚未保证：
 
 - 外部系统与本地账本之间的事务型 exactly-once；
-- 服务启动后主动扫描并自动续跑全部 orphan Turn；
 - 跨进程共享或持久化的 Provider 熔断状态；
 - 不支持 fencing token 的外部系统对陈旧副作用的强制拒绝。
 
@@ -146,4 +147,5 @@ recovered = core.recover_turn(
 Provider 可靠性层的分类、预算、流式边界、熔断状态和事件协议见
 [PROVIDER_RELIABILITY.md](PROVIDER_RELIABILITY.md)，批次级协议见
 [PARALLEL_BATCH_RECOVERY.md](PARALLEL_BATCH_RECOVERY.md)，并发所有权与面试知识点见
-[CONCURRENCY_AND_TAKEOVER.md](CONCURRENCY_AND_TAKEOVER.md)。下一切片将继续处理 orphan Turn 扫描与恢复调度。
+[CONCURRENCY_AND_TAKEOVER.md](CONCURRENCY_AND_TAKEOVER.md)，自动恢复调度见
+[ORPHAN_RECOVERY.md](ORPHAN_RECOVERY.md)。

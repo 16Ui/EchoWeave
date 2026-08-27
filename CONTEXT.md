@@ -39,3 +39,15 @@ _Avoid_: Thread pool, parallel task list
 **Indeterminate Invocation**:
 已经开始、但缺少 durable outcome，且无法证明安全重放的 Tool Invocation。
 _Avoid_: Failed tool, pending tool
+
+**Orphan Turn**:
+最新 Execution Attempt 仍处于未完成状态，但已经没有有效 Execution Owner 的 Logical Turn。
+_Avoid_: Failed turn, dead task
+
+**Recovery Candidate**:
+某一时刻满足自动恢复策略的 Orphan Turn；它只是调度判断，不代表已经取得执行权。
+_Avoid_: Claimed turn, recovery job
+
+**Automatic Recovery**:
+由运行时策略而非操作者请求发起的 Execution Attempt。
+_Avoid_: Retry loop, forced resume

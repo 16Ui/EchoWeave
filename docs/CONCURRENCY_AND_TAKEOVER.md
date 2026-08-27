@@ -98,5 +98,5 @@ read lease -> check expiry -> increment token -> write lease
 
 - 这不是严格 exactly-once；外部系统不校验 fencing/idempotency key 时，已经发出的旧副作用无法撤回；
 - heartbeat 线程证明进程仍维护 Lease，不证明业务线程一定有进展；当前选择保守地阻止 hung executor 被自动接管；
-- 当前接管由 `recover_turn()` 触发，还没有服务启动后的 orphan scanner；
+- orphan scanner 与有界恢复调度已经作为可选生命周期组件提供，详见 [ORPHAN_RECOVERY.md](ORPHAN_RECOVERY.md)；
 - 单机文件锁适合个人 Runtime，未来多节点部署应把 Lease backend 换成支持条件写的数据库或协调服务。

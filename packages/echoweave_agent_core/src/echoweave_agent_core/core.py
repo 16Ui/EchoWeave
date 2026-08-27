@@ -10,6 +10,7 @@ from uuid import uuid4
 from echoweave_agent_core.hooks import CoreTurnContext
 from echoweave_agent_core.outcomes import (
     TurnOutcome,
+    TurnRecoveryConflictError,
     TurnState,
     TurnStateMachine,
     classify_turn_failure,
@@ -140,7 +141,7 @@ class AgentCore:
         lease_status = self.execution_leases.inspect(session_path, turn_id)
         if latest_state in incomplete_states and lease_status.get("state") == "active":
             retry_after = float(lease_status.get("retry_after_seconds") or 0.0)
-            raise ValueError(
+            raise TurnRecoveryConflictError(
                 f"turn is {latest_state} and still has an active execution lease; "
                 f"retry after {retry_after:.3f}s"
             )
@@ -177,46 +178,87 @@ class AgentCore:
             "recovery_checkpoint_id": request.checkpoint_id,
             "recovered_from_state": latest_state,
         }
-        self.session_store.append(
+        execution_lease = self.execution_leases.acquire(
             session_path,
-            "turn.recovery_started",
-            {
-                "turn_id": turn_id,
-                "trace_id": trace_id,
-                "attempt": attempt,
-                "checkpoint_id": request.checkpoint_id,
-                "from_state": latest_state,
-            },
-        )
-        self.session_store.append(
-            session_path,
-            "history_reset",
-            {
-                "history": snapshot.history,
-                "summary": snapshot.summary,
-                "turn_id": turn_id,
-                "trace_id": trace_id,
-                "checkpoint_id": request.checkpoint_id,
-                "reason": "controlled_turn_recovery",
-            },
-        )
-        outcome = self._execute_turn(
-            TurnRequest(
-                prompt=prompt,
-                session_path=session_path,
-                resume=True,
-                history=snapshot.history,
-                summary=snapshot.summary,
-                metadata=recovery_metadata,
-            ),
-            create_checkpoint=False,
             turn_id=turn_id,
             trace_id=trace_id,
-            recovery_checkpoint=checkpoint,
-            attempt=attempt,
-            run_before_hooks=False,
-            stop_on_blocked_tool=True,
         )
+        handed_to_execution = False
+        try:
+            current_events = self.session_store.read_events(session_path)
+            current_states = [
+                event.payload
+                for event in current_events
+                if event.type == "turn.state_changed" and event.payload.get("turn_id") == turn_id
+            ]
+            if not current_states:
+                raise TurnRecoveryConflictError(
+                    "turn state disappeared while acquiring recovery ownership"
+                )
+            current_latest_state = str(current_states[-1].get("state") or "")
+            current_attempt = max(int(state.get("attempt") or 1) for state in current_states)
+            if (
+                any(state.get("state") == TurnState.COMPLETED.value for state in current_states)
+                or current_latest_state != latest_state
+                or current_attempt + 1 != attempt
+            ):
+                raise TurnRecoveryConflictError(
+                    "turn changed while acquiring recovery ownership; retry from a fresh snapshot"
+                )
+            self.session_store.append(
+                session_path,
+                "turn.recovery_started",
+                {
+                    "turn_id": turn_id,
+                    "trace_id": trace_id,
+                    "attempt": attempt,
+                    "checkpoint_id": request.checkpoint_id,
+                    "from_state": latest_state,
+                    "mode": "automatic"
+                    if request.metadata.get("automatic_recovery") is True
+                    else "manual",
+                    "trigger": request.metadata.get("recovery_trigger") or "operator_request",
+                },
+            )
+            self.session_store.append(
+                session_path,
+                "history_reset",
+                {
+                    "history": snapshot.history,
+                    "summary": snapshot.summary,
+                    "turn_id": turn_id,
+                    "trace_id": trace_id,
+                    "checkpoint_id": request.checkpoint_id,
+                    "reason": "controlled_turn_recovery",
+                },
+            )
+            handed_to_execution = True
+            outcome = self._execute_turn(
+                TurnRequest(
+                    prompt=prompt,
+                    session_path=session_path,
+                    resume=True,
+                    history=snapshot.history,
+                    summary=snapshot.summary,
+                    metadata=recovery_metadata,
+                ),
+                create_checkpoint=False,
+                turn_id=turn_id,
+                trace_id=trace_id,
+                recovery_checkpoint=checkpoint,
+                attempt=attempt,
+                run_before_hooks=False,
+                stop_on_blocked_tool=True,
+                acquired_execution_lease=execution_lease,
+            )
+        finally:
+            if not handed_to_execution:
+                self.execution_leases.release(
+                    session_path,
+                    execution_lease,
+                    trace_id=trace_id,
+                    reason="recovery_setup_failed",
+                )
         self.session_store.append(
             session_path,
             "turn.recovery_finished",
@@ -324,6 +366,7 @@ class AgentCore:
         attempt: int = 1,
         run_before_hooks: bool = True,
         stop_on_blocked_tool: bool = False,
+        acquired_execution_lease: ExecutionLease | None = None,
     ) -> TurnOutcome:
         turn_id = turn_id or str(uuid4())
         trace_id = trace_id or str(uuid4())
@@ -335,7 +378,7 @@ class AgentCore:
         checkpoint: dict[str, Any] | None = recovery_checkpoint
         metadata = {**self.metadata, **request.metadata}
         context: CoreTurnContext | None = None
-        execution_lease: ExecutionLease | None = None
+        execution_lease = acquired_execution_lease
         stage = "session"
         try:
             session_path = self._resolve_turn_session(request)
@@ -343,11 +386,16 @@ class AgentCore:
             session_id = snapshot.header.id
             context = CoreTurnContext(session_path=session_path, session_id=session_id, metadata=metadata)
             stage = "execution_lease"
-            execution_lease = self.execution_leases.acquire(
-                session_path,
-                turn_id=turn_id,
-                trace_id=trace_id,
-            )
+            if execution_lease is None:
+                execution_lease = self.execution_leases.acquire(
+                    session_path,
+                    turn_id=turn_id,
+                    trace_id=trace_id,
+                )
+            else:
+                if execution_lease.session_id != session_id or execution_lease.turn_id != turn_id:
+                    raise ValueError("pre-acquired execution lease does not match the requested turn")
+                self.execution_leases.assert_owned(execution_lease)
             metadata = {
                 **metadata,
                 "execution_owner_id": execution_lease.owner_id,

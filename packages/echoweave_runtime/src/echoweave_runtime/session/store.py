@@ -588,6 +588,11 @@ class SessionStore:
             "tool_batch_suspended_count": sum(1 for event in events if event.type == "tool.batch_suspended"),
             "tool_batch_conflict_count": sum(1 for event in events if event.type == "tool.batch_conflict"),
             "recovery_attempt_count": sum(1 for event in events if event.type == "turn.recovery_started"),
+            "automatic_recovery_count": sum(
+                1
+                for event in events
+                if event.type == "turn.recovery_started" and event.payload.get("mode") == "automatic"
+            ),
             "lease_acquired_count": sum(1 for event in events if event.type == "turn.lease_acquired"),
             "lease_takeover_count": sum(1 for event in events if event.type == "turn.lease_taken_over"),
             "lease_rejected_count": sum(1 for event in events if event.type == "turn.lease_rejected"),
