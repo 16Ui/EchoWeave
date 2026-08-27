@@ -254,6 +254,62 @@ def test_webhook_admin_panel_and_approval_api() -> None:
                 "scheduled_scan": schedule,
             }
 
+        def trace_overview(self, *, limit=50, event_limit_per_trace=120):
+            return {
+                "ok": True,
+                "stats": {
+                    "trace_count": 1,
+                    "signal_count": 2,
+                    "status_counts": {"completed": 1},
+                },
+                "traces": [
+                    {
+                        "trace_id": "trace-demo",
+                        "turn_id": "turn-demo",
+                        "conversation_key": "demo:run",
+                        "status": "completed",
+                        "attempt": 1,
+                        "duration_ms": 12.5,
+                        "event_count": 3,
+                        "signal_count": 2,
+                        "events": [
+                            {
+                                "type": "provider.retry_scheduled",
+                                "category": "provider",
+                                "status": "warning",
+                                "title": "provider.retry_scheduled: demo",
+                                "detail": "attempt=1",
+                                "timestamp": "2026-01-01T00:00:00+00:00",
+                            }
+                        ],
+                    }
+                ][:limit],
+                "issues": [],
+                "event_limit": event_limit_per_trace,
+                "requested_limit": limit,
+            }
+
+        def fault_eval_status(self):
+            return {
+                "ok": True,
+                "available": True,
+                "report": {
+                    "run_id": "reliability-demo",
+                    "passed": True,
+                    "scenario_count": 4,
+                    "passed_count": 4,
+                    "overall_score": 1.0,
+                    "scenarios": [],
+                },
+            }
+
+        def run_reliability_demo(self):
+            return {
+                "ok": True,
+                "conversation_key": "demo:reliability-demo",
+                "report": self.fault_eval_status()["report"],
+            }
+
         def list_approvals(self, limit: int = 50):
             return [{"id": "abc123", "status": "pending", "command": "python -m pip install"}]
 
@@ -339,6 +395,14 @@ def test_webhook_admin_panel_and_approval_api() -> None:
         unauthorized_post = unauthorized.getresponse()
         unauthorized_post.read()
         assert unauthorized_post.status == 401
+        unauthorized.request("GET", "/api/traces")
+        unauthorized_traces = unauthorized.getresponse()
+        unauthorized_traces.read()
+        assert unauthorized_traces.status == 401
+        unauthorized.request("POST", "/api/demos/reliability", body="{}")
+        unauthorized_demo = unauthorized.getresponse()
+        unauthorized_demo.read()
+        assert unauthorized_demo.status == 401
         unauthorized.close()
 
         cookie = _login_cookie(port)
@@ -370,6 +434,10 @@ def test_webhook_admin_panel_and_approval_api() -> None:
         assert "故障恢复" in panel_body
         assert "cfg-orphan-recovery-enabled" in panel_body
         assert "/api/recovery/scan" in panel_body
+        assert "Trace 与可靠性证据" in panel_body
+        assert "trace-detail" in panel_body
+        assert "/api/traces" in panel_body
+        assert "/api/demos/reliability" in panel_body
 
         conn.request("GET", "/api/status", headers={"Cookie": cookie})
         status = conn.getresponse()
@@ -391,6 +459,33 @@ def test_webhook_admin_panel_and_approval_api() -> None:
         assert recovery_scan.status == 200
         assert recovery_scan_payload["scheduled_scan"] is True
         assert recovery_scan_payload["candidates"][0]["turn_id"] == "orphan-1"
+
+        conn.request("GET", "/api/traces?limit=10&event_limit=40", headers={"Cookie": cookie})
+        traces = conn.getresponse()
+        traces_payload = json.loads(traces.read().decode("utf-8"))
+        assert traces.status == 200
+        assert traces_payload["stats"]["trace_count"] == 1
+        assert traces_payload["traces"][0]["trace_id"] == "trace-demo"
+        assert traces_payload["event_limit"] == 40
+
+        conn.request("GET", "/api/traces?limit=bad&event_limit=9999", headers={"Cookie": cookie})
+        bounded_traces = conn.getresponse()
+        bounded_payload = json.loads(bounded_traces.read().decode("utf-8"))
+        assert bounded_traces.status == 200
+        assert bounded_payload["requested_limit"] == 50
+        assert bounded_payload["event_limit"] == 500
+
+        conn.request("GET", "/api/evals/fault/latest", headers={"Cookie": cookie})
+        fault_eval = conn.getresponse()
+        fault_eval_payload = json.loads(fault_eval.read().decode("utf-8"))
+        assert fault_eval.status == 200
+        assert fault_eval_payload["report"]["overall_score"] == 1.0
+
+        conn.request("POST", "/api/demos/reliability", body="{}", headers={"Cookie": cookie})
+        demo = conn.getresponse()
+        demo_payload = json.loads(demo.read().decode("utf-8"))
+        assert demo.status == 200
+        assert demo_payload["report"]["passed_count"] == 4
 
         conn.request("GET", "/api/approvals", headers={"Cookie": cookie})
         approvals = conn.getresponse()

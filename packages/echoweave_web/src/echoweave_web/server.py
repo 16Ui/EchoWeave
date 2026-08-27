@@ -182,6 +182,36 @@ class HubWebhookServer:
                     summary = _call_backend(backend, "audit_summary") or {"ok": True, "event_count": 0}
                     self._write_json(200, dict(summary))
                     return
+                if parsed.path == "/api/traces":
+                    if not self._admin_authorized(webhook_token, allow_url_token=allow_url_token):
+                        self._write_json(401, {"ok": False, "error": "Unauthorized"})
+                        return
+                    query = parse_qs(parsed.query)
+                    traces = _call_backend(
+                        backend,
+                        "trace_overview",
+                        limit=_bounded_query_int(query, "limit", default=50, minimum=1, maximum=200),
+                        event_limit_per_trace=_bounded_query_int(
+                            query,
+                            "event_limit",
+                            default=120,
+                            minimum=1,
+                            maximum=500,
+                        ),
+                    ) or {"ok": True, "stats": {}, "traces": [], "issues": []}
+                    self._write_json(200, dict(traces))
+                    return
+                if parsed.path == "/api/evals/fault/latest":
+                    if not self._admin_authorized(webhook_token, allow_url_token=allow_url_token):
+                        self._write_json(401, {"ok": False, "error": "Unauthorized"})
+                        return
+                    report = _call_backend(backend, "fault_eval_status") or {
+                        "ok": True,
+                        "available": False,
+                        "report": None,
+                    }
+                    self._write_json(200, dict(report))
+                    return
                 if parsed.path == "/api/recovery":
                     if not self._admin_authorized(webhook_token, allow_url_token=allow_url_token):
                         self._write_json(401, {"ok": False, "error": "Unauthorized"})
@@ -268,6 +298,16 @@ class HubWebhookServer:
                             "ok": True,
                             "candidates": [],
                             "issues": [],
+                        }
+                        self._write_json(200, dict(result))
+                        return
+                    if parsed.path == "/api/demos/reliability":
+                        if not self._admin_authorized(webhook_token, allow_url_token=allow_url_token):
+                            self._write_json(401, {"ok": False, "error": "Unauthorized"})
+                            return
+                        result = _call_backend(backend, "run_reliability_demo") or {
+                            "ok": False,
+                            "error": "reliability demo is unavailable",
                         }
                         self._write_json(200, dict(result))
                         return
@@ -579,6 +619,21 @@ class HubWebhookServer:
                 web_gateway.serve_forever()
         except KeyboardInterrupt:
             print("Shutting down EchoWeave web gateway.")
+
+
+def _bounded_query_int(
+    query: dict[str, list[str]],
+    key: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        value = int(query.get(key, [str(default)])[0])
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
 
 
 def _handle_web_command(backend: AgentBackend, event_bus: EventBus, payload: dict[str, Any]) -> Any:

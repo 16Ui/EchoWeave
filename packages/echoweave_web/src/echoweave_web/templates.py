@@ -45,8 +45,34 @@ def admin_html() -> str:
       <div class="metric">最近审批<strong id="recent">0</strong></div>
       <div class="metric">自动恢复<strong id="recovery-state">关闭</strong></div>
       <div class="metric">恢复中<strong id="recovery-in-flight">0</strong></div>
+      <div class="metric">Trace<strong id="trace-count">0</strong></div>
+      <div class="metric">可靠性 Eval<strong id="reliability-score">-</strong></div>
     </section>
     <div id="error" class="error"></div>
+
+    <section class="admin-section">
+      <div class="section-head">
+        <div><h2>Trace 与可靠性证据</h2><p>按 Turn/Attempt 查看 Provider、Tool、Policy、Lease 与 Recovery 时间线；演示运行不会访问网络或执行 Shell。</p></div>
+        <div class="toolbar"><button onclick="loadTraces()">刷新 Trace</button><button id="run-demo" class="primary" onclick="runReliabilityDemo()">运行一键演示</button></div>
+      </div>
+      <div id="fault-eval-summary" class="hint-line">尚未运行可靠性演示</div>
+      <div class="table-scroll eval-table">
+        <table>
+          <thead><tr><th>故障场景</th><th>结果</th><th>得分</th><th>耗时</th><th>证据</th></tr></thead>
+          <tbody id="fault-eval-cases"><tr><td colspan="5" class="muted">点击“运行一键演示”生成可复现 Eval</td></tr></tbody>
+        </table>
+      </div>
+      <div id="trace-summary" class="hint-line">Trace 尚未加载</div>
+      <div class="observability-grid">
+        <div class="table-scroll trace-table">
+          <table>
+            <thead><tr><th>会话 / Turn</th><th>状态</th><th>信号</th><th>耗时</th></tr></thead>
+            <tbody id="trace-list"><tr><td colspan="4" class="muted">加载中...</td></tr></tbody>
+          </table>
+        </div>
+        <div id="trace-detail" class="trace-detail"><div class="muted">选择一条 Trace 查看事件时间线</div></div>
+      </div>
+    </section>
 
     <section class="admin-section">
       <div class="section-head">
@@ -281,7 +307,7 @@ def _page(*, title: str, body: str, script: str) -> str:
     button.help {{ border-radius: 999px; width: 20px; height: 20px; padding: 0; font-size: 12px; color: #526173; border-color: #cbd5e1; display: inline-grid; place-items: center; flex: 0 0 auto; }}
     .tooltip-popover {{ position: fixed; z-index: 30; max-width: min(280px, 70vw); background: #111827; color: #fff; border-radius: 6px; padding: 8px 10px; box-shadow: 0 10px 28px rgba(15,23,42,0.22); font-size: 12px; line-height: 1.45; text-align: left; pointer-events: none; opacity: 0; transform: translateY(4px); transition: opacity 0.08s ease, transform 0.08s ease; }}
     .tooltip-popover.visible {{ opacity: 1; transform: translateY(0); }}
-    .status {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }}
+    .status {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }}
     .metric, .panel {{ background: white; border: 1px solid #d9e0e7; border-radius: 8px; padding: 14px; }}
     .metric strong {{ display: block; font-size: 26px; margin-top: 6px; }}
     .admin-section {{ background: white; border: 1px solid #d9e0e7; border-radius: 8px; padding: 14px; overflow: visible; }}
@@ -291,6 +317,22 @@ def _page(*, title: str, body: str, script: str) -> str:
     .save-bar {{ position: sticky; bottom: 0; z-index: 5; background: rgba(246,248,251,0.92); backdrop-filter: blur(8px); padding: 8px 0 0; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; background: white; border: 1px solid #d9e0e7; border-radius: 8px; padding: 14px; }}
     .admin-section .grid {{ border: 0; padding: 0; background: transparent; }}
+    .observability-grid {{ display: grid; grid-template-columns: minmax(360px, .9fr) minmax(0, 1.1fr); gap: 14px; align-items: start; }}
+    .table-scroll {{ overflow: auto; border-radius: 6px; }}
+    .eval-table {{ margin-bottom: 14px; max-height: 280px; }}
+    .trace-table {{ max-height: 520px; }}
+    .trace-row {{ cursor: pointer; }}
+    .trace-row:hover {{ background: #f5f8fc; }}
+    .trace-detail {{ min-height: 180px; max-height: 520px; overflow: auto; border: 1px solid #d9e0e7; border-radius: 8px; padding: 12px; background: #fbfcfe; }}
+    .trace-detail h3 {{ margin: 0 0 4px; font-size: 15px; }}
+    .timeline {{ display: grid; gap: 8px; margin-top: 12px; }}
+    .timeline-event {{ border-left: 4px solid #8da2b8; background: white; border-radius: 4px 7px 7px 4px; padding: 8px 10px; box-shadow: 0 1px 2px rgba(15,23,42,.04); }}
+    .timeline-event.warning {{ border-left-color: #d97706; }}
+    .timeline-event.blocked, .timeline-event.error {{ border-left-color: #b42318; }}
+    .timeline-event.ok {{ border-left-color: #15803d; }}
+    .timeline-head {{ display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }}
+    .timeline-detail {{ color: #637083; font-size: 12px; margin-top: 4px; word-break: break-word; }}
+    .trace-detail pre, .eval-table pre {{ white-space: pre-wrap; word-break: break-word; font-size: 11px; max-width: 560px; }}
     label {{ display: grid; gap: 6px; font-size: 13px; color: #637083; margin-bottom: 10px; }}
     .field-title {{ display: inline-flex; align-items: center; gap: 6px; }}
     input, select, textarea {{ border: 1px solid #c6d0dc; border-radius: 6px; padding: 8px; font: inherit; color: #17202a; background: white; min-width: 0; }}
@@ -342,7 +384,7 @@ def _page(*, title: str, body: str, script: str) -> str:
     .event:last-child {{ border-bottom: 0; padding-bottom: 0; }}
     .composer {{ display: grid; grid-template-columns: 1fr auto; gap: 10px; margin-top: 12px; align-items: end; }}
     .composer textarea {{ min-height: 76px; }}
-    @media (max-width: 900px) {{ .workspace {{ grid-template-columns: 1fr; height: auto; }} main {{ padding: 16px; }} .composer {{ grid-template-columns: 1fr; }} }}
+    @media (max-width: 900px) {{ .workspace, .observability-grid {{ grid-template-columns: 1fr; height: auto; }} main {{ padding: 16px; }} .composer {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
 <body>
@@ -491,6 +533,7 @@ def _admin_script() -> str:
     let editorTarget = null;
     let editorSyncing = false;
     let listPickerTarget = null;
+    let currentTraces = [];
     const KEEP_API_KEY = "__ECHOWEAVE_KEEP_EXISTING_API_KEY__";
 
     async function refreshAll() {
@@ -515,6 +558,102 @@ def _admin_script() -> str:
       document.getElementById("recovery-in-flight").textContent = stats.in_flight ?? 0;
       document.getElementById("recovery-summary").textContent =
         `scans=${stats.scans || 0}，candidates=${stats.candidates_found || 0}，completed=${stats.completed || 0}，failed=${stats.failed || 0}，contended=${stats.contended || 0}，issues=${stats.scan_issues || 0}`;
+    }
+    async function loadTraces() {
+      try {
+        const data = await api("/api/traces?limit=50&event_limit=120");
+        renderTraces(data);
+      } catch (err) {
+        document.getElementById("trace-summary").textContent = "Trace 加载失败：" + String(err);
+      }
+    }
+    function renderTraces(data) {
+      const stats = data.stats || {};
+      currentTraces = data.traces || [];
+      document.getElementById("trace-count").textContent = stats.trace_count ?? currentTraces.length;
+      document.getElementById("trace-summary").textContent =
+        `sessions=${stats.scanned_sessions || 0}，traces=${stats.trace_count || 0}，events=${stats.scoped_event_count || 0}，reliability signals=${stats.signal_count || 0}，issues=${(data.issues || []).length}`;
+      const tbody = document.getElementById("trace-list");
+      if (!currentTraces.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="muted">暂无带 trace_id 的会话事件</td></tr>';
+        document.getElementById("trace-detail").innerHTML = '<div class="muted">运行一键演示或执行一次 Agent Turn 后再查看。</div>';
+        return;
+      }
+      tbody.innerHTML = currentTraces.map((trace, index) => `<tr class="trace-row" onclick="selectTrace(${index})">
+        <td><strong>${escapeHtml(trace.conversation_key || trace.session_id || "")}</strong><div><code>${escapeHtml(trace.turn_id || "")}</code></div><div class="muted">attempt ${escapeHtml(trace.attempt ?? 1)}</div></td>
+        <td><span class="badge">${escapeHtml(trace.status || "unknown")}</span></td>
+        <td>${escapeHtml(trace.signal_count ?? 0)} / ${escapeHtml(trace.event_count ?? 0)}</td>
+        <td>${formatDuration(trace.duration_ms)}</td>
+      </tr>`).join("");
+      selectTrace(0);
+    }
+    function selectTrace(index) {
+      const trace = currentTraces[index];
+      if (!trace) return;
+      const events = trace.events || [];
+      document.getElementById("trace-detail").innerHTML = `
+        <h3>${escapeHtml(trace.conversation_key || trace.session_id || "Trace")}</h3>
+        <div><code>${escapeHtml(trace.trace_id || "")}</code></div>
+        <div class="hint-line">turn=${escapeHtml(trace.turn_id || "")} · attempt=${escapeHtml(trace.attempt ?? 1)} · status=${escapeHtml(trace.status || "")} · duration=${formatDuration(trace.duration_ms)}</div>
+        <div class="timeline">${events.map(event => `<div class="timeline-event ${escapeHtml(event.status || "ok")}">
+          <div class="timeline-head"><strong>${escapeHtml(event.title || event.type || "event")}</strong><span>${escapeHtml(formatTimestamp(event.timestamp))}</span></div>
+          <div class="timeline-detail">${escapeHtml(event.detail || event.category || "")}</div>
+          <details><summary>事件载荷</summary><pre>${escapeHtml(JSON.stringify(event.payload || {}, null, 2))}</pre></details>
+        </div>`).join("")}</div>`;
+    }
+    function formatDuration(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+      const ms = Number(value);
+      return ms < 1000 ? `${ms.toFixed(1)} ms` : `${(ms / 1000).toFixed(2)} s`;
+    }
+    function formatTimestamp(value) {
+      if (!value) return "";
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleTimeString();
+    }
+    async function loadFaultEval() {
+      try {
+        const data = await api("/api/evals/fault/latest");
+        renderFaultEval(data.report || null);
+      } catch (err) {
+        document.getElementById("fault-eval-summary").textContent = "Eval 加载失败：" + String(err);
+      }
+    }
+    function renderFaultEval(report) {
+      const tbody = document.getElementById("fault-eval-cases");
+      if (!report) {
+        document.getElementById("reliability-score").textContent = "-";
+        document.getElementById("fault-eval-summary").textContent = "尚未运行可靠性演示";
+        tbody.innerHTML = '<tr><td colspan="5" class="muted">点击“运行一键演示”生成可复现 Eval</td></tr>';
+        return;
+      }
+      document.getElementById("reliability-score").textContent = `${Math.round(Number(report.overall_score || 0) * 100)}%`;
+      document.getElementById("fault-eval-summary").textContent =
+        `run=${report.run_id || ""}，passed=${report.passed_count || 0}/${report.scenario_count || 0}，report=${report.report_path || ""}`;
+      const scenarios = report.scenarios || [];
+      tbody.innerHTML = scenarios.map(item => `<tr>
+        <td><strong>${escapeHtml(item.title || item.id || "")}</strong><div><code>${escapeHtml(item.id || "")}</code></div></td>
+        <td>${item.passed ? "PASS" : "FAIL"}</td>
+        <td>${Number(item.score || 0).toFixed(2)}</td>
+        <td>${formatDuration(item.duration_ms)}</td>
+        <td><details><summary>expected / observed</summary><pre>${escapeHtml(JSON.stringify({expected: item.expected, observed: item.observed, error: item.error}, null, 2))}</pre></details></td>
+      </tr>`).join("") || '<tr><td colspan="5" class="muted">报告中没有场景</td></tr>';
+    }
+    async function runReliabilityDemo() {
+      const button = document.getElementById("run-demo");
+      button.disabled = true;
+      button.textContent = "运行中...";
+      document.getElementById("error").textContent = "";
+      try {
+        const result = await api("/api/demos/reliability", { method: "POST", body: "{}" });
+        renderFaultEval(result.report || null);
+        await loadTraces();
+      } catch (err) {
+        document.getElementById("error").textContent = String(err);
+      } finally {
+        button.disabled = false;
+        button.textContent = "运行一键演示";
+      }
     }
     async function scanRecovery() {
       document.getElementById("error").textContent = "";
@@ -1018,6 +1157,8 @@ def _admin_script() -> str:
       await refreshAll();
     }
     refreshAll();
+    loadTraces();
+    loadFaultEval();
     setInterval(refreshAll, 5000);
 """
 

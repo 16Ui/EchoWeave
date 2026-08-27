@@ -276,6 +276,9 @@ class EchoWeaveSocialAgent:
         )
 
     def recovery_contexts(self) -> tuple[SocialRecoveryContext, ...]:
+        return self.session_contexts()
+
+    def session_contexts(self) -> tuple[SocialRecoveryContext, ...]:
         contexts: list[SocialRecoveryContext] = []
         for conversation_key, record in self.state.session_records().items():
             raw_session = record.get("runtime_session")
@@ -300,9 +303,7 @@ class EchoWeaveSocialAgent:
 
     def build_recovery_core(self, session_path: Path) -> AgentCore:
         resolved = session_path.expanduser().resolve()
-        matches = [
-            item for item in self.recovery_contexts() if item.session_path == resolved
-        ]
+        matches = [item for item in self.session_contexts() if item.session_path == resolved]
         if not matches:
             raise ValueError(f"no social conversation owns recovery session: {resolved}")
         if len(matches) > 1:

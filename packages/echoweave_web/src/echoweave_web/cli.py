@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from echoweave_social.cli import init, once
+from echoweave_social.cli import init, once, reliability_demo
 from echoweave_social.composition import build_backend, create_adapter, setup_logging
 from echoweave_social.config import EchoWeaveConfig
 from echoweave_social.onebot_client import OneBotHttpClient
@@ -14,6 +14,7 @@ from echoweave_web.server import HubWebhookServer
 app = typer.Typer(add_completion=False)
 app.command()(init)
 app.command()(once)
+app.command("demo")(reliability_demo)
 
 
 @app.command()

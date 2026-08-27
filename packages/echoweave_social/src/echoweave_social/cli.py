@@ -6,8 +6,10 @@ from pathlib import Path
 
 import typer
 
+from echoweave_harness.fault_injection import FaultInjectionEvalRunner
 from echoweave_social.composition import build_backend, create_adapter
 from echoweave_social.config import EchoWeaveConfig
+from echoweave_social.state import SocialStateStore
 
 
 app = typer.Typer(add_completion=False)
@@ -142,6 +144,58 @@ def once(
         typer.echo(json.dumps(outbound, ensure_ascii=False))
     else:
         typer.echo(reply.text)
+
+
+@app.command("demo")
+def reliability_demo(
+    cwd: str = typer.Option(".", help="Workspace used to store demo artifacts"),
+    output_root: str | None = typer.Option(
+        None,
+        "--output-root",
+        help="Optional demo artifact directory",
+    ),
+    state_path: str | None = typer.Option(
+        None,
+        "--state-path",
+        help="Optional social state file; registers the generated trace for the Web admin",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Print the full report as JSON"),
+) -> None:
+    workspace = Path(cwd).expanduser().resolve()
+    report = FaultInjectionEvalRunner(
+        workspace,
+        output_root=Path(output_root).expanduser().resolve() if output_root else None,
+    ).run()
+    conversation_key = f"demo:{report.run_id}"
+    if state_path:
+        SocialStateStore(Path(state_path).expanduser().resolve()).register_runtime_session(
+            conversation_key,
+            session_path=Path(report.session_path),
+            session_id=report.session_id,
+            workspace=Path(report.workspace),
+            metadata={
+                "demo": True,
+                "demo_run_id": report.run_id,
+                "demo_report_path": report.report_path,
+            },
+        )
+    payload = {
+        "ok": report.passed,
+        "conversation_key": conversation_key,
+        "registered_state_path": str(Path(state_path).expanduser().resolve()) if state_path else None,
+        "report": report.to_dict(),
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    typer.echo(
+        f"EchoWeave reliability demo: {report.passed_count}/{report.scenario_count} passed "
+        f"(score={report.overall_score:.2f})"
+    )
+    typer.echo(f"trace session: {report.session_path}")
+    typer.echo(f"eval report: {report.report_path}")
+    if state_path:
+        typer.echo(f"registered conversation: {conversation_key}")
 
 
 if __name__ == "__main__":

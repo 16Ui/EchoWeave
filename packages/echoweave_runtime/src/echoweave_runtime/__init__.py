@@ -31,6 +31,7 @@ from echoweave_runtime.provider_reliability import (
     ProviderRetryBudget,
     ProviderRetryPolicy,
 )
+from echoweave_runtime.observability import build_trace_timeline
 
 __all__ = [
     "LifecycleComponent",
@@ -64,4 +65,5 @@ __all__ = [
     "ProviderReliabilityController",
     "ProviderRetryBudget",
     "ProviderRetryPolicy",
+    "build_trace_timeline",
 ]

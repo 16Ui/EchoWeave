@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 class SocialStateStore:
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._lock = threading.RLock()
         self._state = self._load()
 
     def _load(self) -> dict[str, Any]:
@@ -26,11 +28,12 @@ class SocialStateStore:
         return data
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(self._state, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(
+                json.dumps(self._state, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
 
     def session(self, conversation_key: str) -> dict[str, Any]:
         sessions = self._state.setdefault("sessions", {})
@@ -52,14 +55,39 @@ class SocialStateStore:
 
     def session_records(self) -> dict[str, dict[str, Any]]:
         """Return a detached projection for background inspection."""
-        sessions = self._state.get("sessions")
-        if not isinstance(sessions, dict):
-            return {}
-        return {
-            str(key): dict(value)
-            for key, value in sessions.items()
-            if isinstance(key, str) and isinstance(value, dict)
-        }
+        with self._lock:
+            sessions = self._state.get("sessions")
+            if not isinstance(sessions, dict):
+                return {}
+            return {
+                str(key): dict(value)
+                for key, value in sessions.items()
+                if isinstance(key, str) and isinstance(value, dict)
+            }
+
+    def register_runtime_session(
+        self,
+        conversation_key: str,
+        *,
+        session_path: Path,
+        session_id: str,
+        workspace: Path,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically register a generated or externally prepared runtime session."""
+        with self._lock:
+            record = self.session(conversation_key)
+            record.update(
+                {
+                    "runtime_session": str(session_path.expanduser().resolve()),
+                    "runtime_session_id": session_id,
+                    "workspace": str(workspace.expanduser().resolve()),
+                    "workspace_bound": True,
+                }
+            )
+            if metadata:
+                record.update(metadata)
+            self.save()
 
     def approvals(self) -> dict[str, Any]:
         approvals = self._state.setdefault("approvals", {})

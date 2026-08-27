@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from echoweave_harness.audit import AuditEvent, JsonlAuditSink, configure_audit, get_audit_sink, record_audit
 from echoweave_harness.evaluation import EvalCriterionResult, EvalScorecard, score_eval_case
+from echoweave_harness.fault_injection import (
+    FaultEvalReport,
+    FaultInjectionEvalRunner,
+    FaultScenarioResult,
+    load_latest_fault_eval,
+)
 from echoweave_harness.metrics import HarnessMetrics, compute_harness_metrics
 from echoweave_harness.policy import HarnessPolicy, PolicyDecision, configure_harness_policy, get_harness_policy, load_harness_policy
 from echoweave_harness.runtime_bridge import HarnessRuntimePolicyEvaluator, install_runtime_bridge
@@ -12,6 +18,9 @@ __all__ = [
     "AuditEvent",
     "EvalCriterionResult",
     "EvalScorecard",
+    "FaultEvalReport",
+    "FaultInjectionEvalRunner",
+    "FaultScenarioResult",
     "HarnessMetrics",
     "HarnessPolicy",
     "JsonlAuditSink",
@@ -23,6 +32,7 @@ __all__ = [
     "get_audit_sink",
     "get_harness_policy",
     "load_harness_policy",
+    "load_latest_fault_eval",
     "record_audit",
     "score_eval_case",
     "install_runtime_bridge",

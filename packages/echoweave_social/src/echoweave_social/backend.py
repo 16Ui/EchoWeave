@@ -10,12 +10,21 @@ from typing import Any, Protocol
 from echoweave_ai import register_ai_providers_from_config
 from echoweave_agent_core import OrphanRecoveryConfig
 from echoweave_harness.audit import configure_audit, read_audit_events, record_audit
-from echoweave_harness.feedback import suggest_harness_improvements, write_eval_fixtures, write_feedback_backlog
+from echoweave_harness.fault_injection import (
+    FaultInjectionEvalRunner,
+    load_latest_fault_eval,
+)
+from echoweave_harness.feedback import (
+    suggest_harness_improvements,
+    write_eval_fixtures,
+    write_feedback_backlog,
+)
 from echoweave_harness.metrics import compute_harness_metrics
 from echoweave_harness.policy import configure_harness_policy
 from echoweave_runtime.events import InboundMessage, OutboundMessage
 from echoweave_social.access_control import AccessDecision, AccessPolicy, DEFAULT_ADMIN_ONLY_COMMANDS
 from echoweave_social.agent_runtime import SocialAgentConfig, EchoWeaveSocialAgent
+from echoweave_social.observability import SocialTraceExplorer
 from echoweave_social.recovery import SocialRecoveryController
 
 
@@ -80,6 +89,7 @@ class EchoWeaveBackend:
 
     def __init__(self, config: EchoWeaveBackendConfig) -> None:
         self._lifecycle_lock = threading.RLock()
+        self._demo_lock = threading.Lock()
         self._started = False
         self._recovery: SocialRecoveryController | None = None
         self._config = config
@@ -470,6 +480,76 @@ class EchoWeaveBackend:
             "metrics": metrics.to_dict(),
             "suggestions": [item.to_dict() for item in suggestions],
         }
+
+    def trace_overview(
+        self,
+        *,
+        limit: int = 50,
+        event_limit_per_trace: int = 120,
+    ) -> dict[str, object]:
+        with self._lifecycle_lock:
+            agent = self._agent
+        return SocialTraceExplorer(agent).snapshot(
+            limit=limit,
+            event_limit_per_trace=event_limit_per_trace,
+        )
+
+    def fault_eval_status(self) -> dict[str, object]:
+        with self._lifecycle_lock:
+            output_root = self._fault_demo_root()
+        report = load_latest_fault_eval(output_root)
+        return {
+            "ok": True,
+            "output_root": str(output_root),
+            "available": report is not None,
+            "report": report,
+        }
+
+    def run_reliability_demo(self) -> dict[str, object]:
+        with self._demo_lock:
+            with self._lifecycle_lock:
+                workspace = self._config.default_workspace
+                output_root = self._fault_demo_root()
+            report = FaultInjectionEvalRunner(
+                workspace,
+                output_root=output_root,
+            ).run()
+            conversation_key = f"demo:{report.run_id}"
+            with self._lifecycle_lock:
+                self._agent.state.register_runtime_session(
+                    conversation_key,
+                    session_path=Path(report.session_path),
+                    session_id=report.session_id,
+                    workspace=Path(report.workspace),
+                    metadata={
+                        "demo": True,
+                        "demo_run_id": report.run_id,
+                        "demo_report_path": report.report_path,
+                    },
+                )
+            record_audit(
+                "eval",
+                "fault_injection_demo",
+                status="ok" if report.passed else "failed",
+                subject=report.run_id,
+                conversation_id=conversation_key,
+                session_id=report.session_id,
+                workspace=report.workspace,
+                metadata={
+                    "scenario_count": report.scenario_count,
+                    "passed_count": report.passed_count,
+                    "overall_score": report.overall_score,
+                    "report_path": report.report_path,
+                },
+            )
+            return {
+                "ok": True,
+                "conversation_key": conversation_key,
+                "report": report.to_dict(),
+            }
+
+    def _fault_demo_root(self) -> Path:
+        return self._config.default_workspace / "echoweave-data" / "demos"
 
     def generate_hardening_plan(
         self,

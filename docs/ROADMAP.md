@@ -35,7 +35,8 @@ EchoWeave 的主线是可扩展的个人 Agent Runtime。实习经验只用于�
 - Web Chat 与管理面板；
 - Provider、Channel、Plugin、Session 和权限配置；
 - 会话级模型、Skill 与工作区绑定；
-- Trace、错误、Token、延迟和工具轨迹查看。
+- [已完成首个切片] Trace 时间线：按 Turn/Attempt 聚合 Provider、Tool、Policy、Lease、Recovery、错误和耗时，并在管理端交互查看；
+- Token 用量与跨会话趋势报表。
 
 ## M4：旗舰 Coding Workspace
 
@@ -51,5 +52,6 @@ EchoWeave 的主线是可扩展的个人 Agent Runtime。实习经验只用于�
 - [已完成首个切片] 并行工具批次部分完成、durable reuse、安全重试与成员冲突故障注入；
 - [已完成首个切片] 多线程竞争、跨进程锁、heartbeat、过期 Lease takeover 与 stale owner fencing；
 - [已完成首个切片] orphan 扫描、固定恢复线程池、attempt 上限、扫描故障隔离、持有 Lease 后状态重校验，以及 Web/Social 多工作区控制面；
+- [已完成首个切片] Provider retry、Circuit Breaker、路径穿越和 Lease fencing 的确定性故障注入 Eval，以及 CLI/管理端一键演示；
 - Golden Set、回归阈值和 CI 门禁；
 - 架构说明、演示视频和性能/可靠性报告。

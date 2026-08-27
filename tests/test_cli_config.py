@@ -205,6 +205,34 @@ def test_config_loads_mapping_paths_and_tokens() -> None:
         assert cfg.orphan_recovery_max_attempts_per_turn == 4
 
 
+def test_reliability_demo_command_writes_eval_and_registers_trace() -> None:
+    with _local_tmp() as tmp_path:
+        state_path = tmp_path / "state.json"
+        result = CliRunner().invoke(
+            app,
+            [
+                "demo",
+                "--cwd",
+                str(tmp_path / "workspace"),
+                "--output-root",
+                str(tmp_path / "artifacts"),
+                "--state-path",
+                str(state_path),
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is True
+        assert payload["report"]["passed_count"] == 4
+        assert Path(payload["report"]["report_path"]).is_file()
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        record = state["sessions"][payload["conversation_key"]]
+        assert record["demo"] is True
+        assert record["runtime_session"] == payload["report"]["session_path"]
+
+
 def test_model_factory_supports_openai_compatible_provider(monkeypatch) -> None:
     from echoweave_runtime.models.factory import create_model_client, get_provider_capabilities
 

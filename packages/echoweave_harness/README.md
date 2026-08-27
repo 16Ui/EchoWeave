@@ -1,5 +1,10 @@
 # echoweave_harness
 
+Harness 还提供确定性的可靠性故障注入运行器，覆盖 Provider retry/circuit、路径穿越阻断和
+Execution Lease fencing。运行 `echoweave demo --cwd <workspace>` 会生成结构化 Eval 报告与可由
+管理端 Trace 时间线直接读取的 Session 事件。完整设计见
+[`docs/OBSERVABILITY_AND_FAULT_EVAL.md`](../../docs/OBSERVABILITY_AND_FAULT_EVAL.md)。
+
 `echoweave_harness` 是 EchoWeave 的 Agent harness 包，用来集中管理跨业务模块的治理能力。
 
 它负责：
