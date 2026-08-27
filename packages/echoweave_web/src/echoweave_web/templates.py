@@ -43,8 +43,22 @@ def admin_html() -> str:
       <div class="metric">服务<strong id="service">-</strong></div>
       <div class="metric">待审批<strong id="pending">0</strong></div>
       <div class="metric">最近审批<strong id="recent">0</strong></div>
+      <div class="metric">自动恢复<strong id="recovery-state">关闭</strong></div>
+      <div class="metric">恢复中<strong id="recovery-in-flight">0</strong></div>
     </section>
     <div id="error" class="error"></div>
+
+    <section class="admin-section">
+      <div class="section-head">
+        <div><h2>故障恢复</h2><p>查看 Orphan Turn 调度状态，并立即扫描已登记的会话工作区。</p></div>
+        <button onclick="scanRecovery()">立即扫描</button>
+      </div>
+      <div id="recovery-summary" class="hint-line">未加载</div>
+      <table>
+        <thead><tr><th>会话</th><th>Turn</th><th>状态</th><th>Attempt</th><th>旧 Owner</th><th>工作区</th></tr></thead>
+        <tbody id="recovery-candidates"><tr><td colspan="6" class="muted">点击“立即扫描”查看 Candidate</td></tr></tbody>
+      </table>
+    </section>
 
     <section class="admin-section">
       <div class="section-head">
@@ -110,6 +124,10 @@ def admin_html() -> str:
       <section class="grid">
         <label><span class="field-title">Sandbox root <button type="button" class="help" data-tip="每个会话独立沙盒的根目录。未绑定真实仓库时，文件操作都限制在这里。">?</button></span><input id="cfg-sandbox-root"></label>
         <label><span class="field-title">审批超时秒数 <button type="button" class="help" data-tip="命令审批 pending 多久后自动过期。">?</button></span><input id="cfg-approval-timeout" type="number" min="1"></label>
+        <label><span class="field-title">Orphan 自动恢复 <button type="button" class="help" data-tip="默认关闭。开启后仅接管 Lease 已过期、存在 checkpoint 且未暂停的 Turn。">?</button></span><select id="cfg-orphan-recovery-enabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
+        <label><span class="field-title">恢复扫描间隔 <button type="button" class="help" data-tip="后台扫描已登记会话工作区的间隔秒数。">?</button></span><input id="cfg-orphan-recovery-interval" type="number" min="0.1" step="0.1"></label>
+        <label><span class="field-title">每轮恢复上限 <button type="button" class="help" data-tip="一次扫描最多调度多少个 Candidate；Social Runtime 当前固定单 worker。">?</button></span><input id="cfg-orphan-recovery-max" type="number" min="1"></label>
+        <label><span class="field-title">单 Turn attempt 上限 <button type="button" class="help" data-tip="包含初始 attempt，用于防止进程反复崩溃形成无限恢复。">?</button></span><input id="cfg-orphan-recovery-attempts" type="number" min="2"></label>
         <div class="picker-card">
           <div><strong>全局 skills</strong><span>所有会话默认启用的 skill</span></div>
           <button type="button" onclick="openListPicker('global_enabled_skills')">选择 skills</button>
@@ -481,11 +499,43 @@ def _admin_script() -> str:
         const status = await api("/api/status");
         document.getElementById("service").textContent = status.service || "EchoWeave";
         document.getElementById("pending").textContent = status.approvals?.pending ?? 0;
+        renderRecoveryStatus(status.recovery || {});
         try { currentCapabilities = await api("/api/capabilities?conversation_id=web-coding&sender_id=web-admin"); }
         catch { currentCapabilities = {}; }
         if (status.config) renderConfig(status.config);
         const approvals = await api("/api/approvals");
         renderApprovals(approvals.approvals || []);
+      } catch (err) {
+        document.getElementById("error").textContent = String(err);
+      }
+    }
+    function renderRecoveryStatus(recovery) {
+      const stats = recovery.stats || {};
+      document.getElementById("recovery-state").textContent = recovery.running ? "运行中" : (recovery.enabled ? "待启动" : "关闭");
+      document.getElementById("recovery-in-flight").textContent = stats.in_flight ?? 0;
+      document.getElementById("recovery-summary").textContent =
+        `scans=${stats.scans || 0}，candidates=${stats.candidates_found || 0}，completed=${stats.completed || 0}，failed=${stats.failed || 0}，contended=${stats.contended || 0}，issues=${stats.scan_issues || 0}`;
+    }
+    async function scanRecovery() {
+      document.getElementById("error").textContent = "";
+      try {
+        const result = await api("/api/recovery/scan", { method: "POST", body: "{}" });
+        const tbody = document.getElementById("recovery-candidates");
+        const candidates = result.candidates || [];
+        if (!candidates.length) {
+          tbody.innerHTML = '<tr><td colspan="6" class="muted">没有可自动恢复的 Orphan Turn</td></tr>';
+        } else {
+          tbody.innerHTML = candidates.map(item => `<tr>
+            <td>${escapeHtml(item.conversation_key || item.session_id || "")}</td>
+            <td><code>${escapeHtml(item.turn_id || "")}</code></td>
+            <td>${escapeHtml(item.latest_state || "")}</td>
+            <td>${escapeHtml(item.latest_attempt ?? "")}</td>
+            <td><code>${escapeHtml(item.previous_owner_id || "")}</code></td>
+            <td><code>${escapeHtml(item.workspace || "")}</code></td>
+          </tr>`).join("");
+        }
+        document.getElementById("recovery-summary").textContent =
+          `本次扫描 sessions=${result.scanned_sessions || 0}，candidates=${candidates.length}，issues=${(result.issues || []).length}，scheduled=${Boolean(result.scheduled_scan)}`;
       } catch (err) {
         document.getElementById("error").textContent = String(err);
       }
@@ -528,6 +578,10 @@ def _admin_script() -> str:
       setCustomSelectOptions("cfg-model", modelChoices(config.provider || "demo", modelProfiles), config.model || "");
       document.getElementById("cfg-sandbox-root").value = config.sandbox_root || "";
       document.getElementById("cfg-approval-timeout").value = config.approval_timeout_seconds || 3600;
+      document.getElementById("cfg-orphan-recovery-enabled").value = String(Boolean(config.orphan_recovery_enabled));
+      document.getElementById("cfg-orphan-recovery-interval").value = config.orphan_recovery_scan_interval_seconds || 30;
+      document.getElementById("cfg-orphan-recovery-max").value = config.orphan_recovery_max_per_scan || 4;
+      document.getElementById("cfg-orphan-recovery-attempts").value = config.orphan_recovery_max_attempts_per_turn || 3;
       document.getElementById("cfg-rag-enabled").value = String(Boolean(config.rag_enabled));
       ensureSelectValue("cfg-rag-backend", config.rag_backend || "pgvector_hybrid_bgem3");
       setCustomSelectOptions("cfg-rag-table", ["echoweave_rag_chunks", "echoweave_rag_documents", "rag_chunks"], config.rag_pgvector_table || "echoweave_rag_chunks");
@@ -935,6 +989,10 @@ def _admin_script() -> str:
         model: customSelectValue("cfg-model") || null,
         sandbox_root: valueOf("cfg-sandbox-root") || null,
         approval_timeout_seconds: Number(valueOf("cfg-approval-timeout") || 3600),
+        orphan_recovery_enabled: valueOf("cfg-orphan-recovery-enabled") === "true",
+        orphan_recovery_scan_interval_seconds: Number(valueOf("cfg-orphan-recovery-interval") || 30),
+        orphan_recovery_max_per_scan: Number(valueOf("cfg-orphan-recovery-max") || 4),
+        orphan_recovery_max_attempts_per_turn: Number(valueOf("cfg-orphan-recovery-attempts") || 3),
         rag_enabled: valueOf("cfg-rag-enabled") === "true",
         rag_backend: valueOf("cfg-rag-backend") || "pgvector_hybrid_bgem3",
         rag_pgvector_table: customSelectValue("cfg-rag-table") || "echoweave_rag_chunks",

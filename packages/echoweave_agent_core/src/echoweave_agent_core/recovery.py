@@ -111,6 +111,10 @@ class _RecoveryCore(Protocol):
     def recover_turn(self, request: RecoverTurnRequest) -> TurnOutcome: ...
 
 
+class _OrphanScanner(Protocol):
+    def scan(self) -> OrphanScanReport: ...
+
+
 class OrphanTurnScanner:
     """Builds a read-only projection of lease-proven orphan turns."""
 
@@ -239,19 +243,26 @@ class OrphanRecoveryScheduler:
 
     def __init__(
         self,
-        core: _RecoveryCore,
+        core: _RecoveryCore | None,
         config: OrphanRecoveryConfig | None = None,
         *,
         core_factory: Callable[[OrphanTurnCandidate], _RecoveryCore] | None = None,
+        scanner: _OrphanScanner | None = None,
     ) -> None:
         self.core = core
         self.config = config or OrphanRecoveryConfig()
+        if core is None and core_factory is None:
+            raise ValueError("orphan recovery requires a core or core_factory")
         if self.config.max_concurrent_recoveries > 1 and core_factory is None:
             raise ValueError(
                 "parallel orphan recovery requires a core_factory that creates an isolated runtime"
             )
         self.core_factory = core_factory
-        self.scanner = OrphanTurnScanner(core, self.config)
+        if scanner is None:
+            if core is None:
+                raise ValueError("orphan recovery requires a scanner when no default core is provided")
+            scanner = OrphanTurnScanner(core, self.config)
+        self.scanner = scanner
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
@@ -382,6 +393,8 @@ class OrphanRecoveryScheduler:
         started_at = time.time()
         try:
             recovery_core = self.core_factory(candidate) if self.core_factory is not None else self.core
+            if recovery_core is None:
+                raise RuntimeError("no recovery core is available for the candidate")
             outcome = recovery_core.recover_turn(
                 RecoverTurnRequest(
                     session_path=candidate.session_path,

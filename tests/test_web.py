@@ -227,7 +227,32 @@ def test_webhook_admin_panel_and_approval_api() -> None:
             )
 
         def admin_status(self):
-            return {"ok": True, "service": "EchoWeave", "approvals": {"pending": 1, "recent": []}}
+            return {
+                "ok": True,
+                "service": "EchoWeave",
+                "recovery": self.recovery_status(),
+                "approvals": {"pending": 1, "recent": []},
+            }
+
+        def recovery_status(self):
+            return {
+                "enabled": True,
+                "backend_started": True,
+                "running": True,
+                "config": {"scan_interval_seconds": 30.0},
+                "stats": {"in_flight": 1, "completed": 2, "failed": 0},
+                "recent_results": [],
+            }
+
+        def scan_recovery(self, *, schedule=True):
+            return {
+                "ok": True,
+                "enabled": True,
+                "scanned_sessions": 3,
+                "candidates": [{"turn_id": "orphan-1", "conversation_key": "web-user:room"}],
+                "issues": [],
+                "scheduled_scan": schedule,
+            }
 
         def list_approvals(self, limit: int = 50):
             return [{"id": "abc123", "status": "pending", "command": "python -m pip install"}]
@@ -266,6 +291,10 @@ def test_webhook_admin_panel_and_approval_api() -> None:
                 "rag_bm25_weight": 0.35,
                 "sandbox_root": "sandboxes",
                 "approval_timeout_seconds": 3600,
+                "orphan_recovery_enabled": True,
+                "orphan_recovery_scan_interval_seconds": 30.0,
+                "orphan_recovery_max_per_scan": 4,
+                "orphan_recovery_max_attempts_per_turn": 3,
                 "global_enabled_skills": [],
                 "admins": [],
             }
@@ -301,6 +330,17 @@ def test_webhook_admin_panel_and_approval_api() -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        unauthorized = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        unauthorized.request("GET", "/api/recovery")
+        unauthorized_get = unauthorized.getresponse()
+        unauthorized_get.read()
+        assert unauthorized_get.status == 401
+        unauthorized.request("POST", "/api/recovery/scan", body="{}")
+        unauthorized_post = unauthorized.getresponse()
+        unauthorized_post.read()
+        assert unauthorized_post.status == 401
+        unauthorized.close()
+
         cookie = _login_cookie(port)
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         conn.request("GET", "/", headers={"Cookie": cookie})
@@ -327,12 +367,30 @@ def test_webhook_admin_panel_and_approval_api() -> None:
         assert "data-tip=\"新会话默认使用的模型配置" in panel_body
         assert "data-field=\"api_key\"" in panel_body
         assert "配置模型与密钥" in panel_body
+        assert "故障恢复" in panel_body
+        assert "cfg-orphan-recovery-enabled" in panel_body
+        assert "/api/recovery/scan" in panel_body
 
         conn.request("GET", "/api/status", headers={"Cookie": cookie})
         status = conn.getresponse()
         status_payload = json.loads(status.read().decode("utf-8"))
         assert status.status == 200
         assert status_payload["approvals"]["pending"] == 1
+        assert status_payload["recovery"]["stats"]["completed"] == 2
+
+        conn.request("GET", "/api/recovery", headers={"Cookie": cookie})
+        recovery = conn.getresponse()
+        recovery_payload = json.loads(recovery.read().decode("utf-8"))
+        assert recovery.status == 200
+        assert recovery_payload["recovery"]["running"] is True
+        assert recovery_payload["recovery"]["stats"]["in_flight"] == 1
+
+        conn.request("POST", "/api/recovery/scan", body="{}", headers={"Cookie": cookie})
+        recovery_scan = conn.getresponse()
+        recovery_scan_payload = json.loads(recovery_scan.read().decode("utf-8"))
+        assert recovery_scan.status == 200
+        assert recovery_scan_payload["scheduled_scan"] is True
+        assert recovery_scan_payload["candidates"][0]["turn_id"] == "orphan-1"
 
         conn.request("GET", "/api/approvals", headers={"Cookie": cookie})
         approvals = conn.getresponse()

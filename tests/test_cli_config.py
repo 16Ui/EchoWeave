@@ -92,6 +92,10 @@ def test_cli_init_creates_local_config() -> None:
         assert data["webhook_token"]
         assert data["web_allow_url_token"] is False
         assert data["web_session_ttl_seconds"] == 28800
+        assert data["orphan_recovery_enabled"] is False
+        assert data["orphan_recovery_scan_interval_seconds"] == 30.0
+        assert data["orphan_recovery_max_per_scan"] == 4
+        assert data["orphan_recovery_max_attempts_per_turn"] == 3
         assert data["default_model_profile"] == "demo-echo"
         assert data["model_profiles"]["demo-echo"]["label"] == "Demo / 本地 Echo"
         assert data["model_profiles"]["deepseek-chat"]["provider"] == "deepseek"
@@ -148,6 +152,10 @@ def test_config_loads_mapping_paths_and_tokens() -> None:
                 "bot_ids": ["777"],
                 "admin_only_commands": ["approve", "deny", "bind", "rag:index"],
                 "approval_timeout_seconds": 120,
+                "orphan_recovery_enabled": True,
+                "orphan_recovery_scan_interval_seconds": 12.5,
+                "orphan_recovery_max_per_scan": 6,
+                "orphan_recovery_max_attempts_per_turn": 4,
             }
         )
 
@@ -191,6 +199,10 @@ def test_config_loads_mapping_paths_and_tokens() -> None:
         assert cfg.bot_ids == ("777",)
         assert cfg.admin_only_commands == ("approve", "deny", "bind", "rag:index")
         assert cfg.approval_timeout_seconds == 120
+        assert cfg.orphan_recovery_enabled is True
+        assert cfg.orphan_recovery_scan_interval_seconds == 12.5
+        assert cfg.orphan_recovery_max_per_scan == 6
+        assert cfg.orphan_recovery_max_attempts_per_turn == 4
 
 
 def test_model_factory_supports_openai_compatible_provider(monkeypatch) -> None:

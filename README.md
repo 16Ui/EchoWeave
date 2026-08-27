@@ -75,7 +75,7 @@ EchoWeave
 - 并行批次恢复：稳定批次身份、成员指纹校验、部分完成摘要，以及 safe retry / durable reuse / indeterminate suspend 分流。
 - 执行所有权：跨进程可过期 Lease、后台 heartbeat、单调 fencing token 与 stale owner 拦截，支持重启后的安全接管。
 - 并发基础设施：只读工具线程池、Session JSONL 的进程内/跨进程双层锁、按 Store 协调器单例和进程级心跳调度单例。
-- 孤儿恢复调度：只读扫描过期 Lease，以固定线程池和 attempt 上限自动接管，并在持有 Lease 后重新校验状态。
+- 孤儿恢复控制面：长运行 Web/Social 服务可按配置启动单进程调度器，动态聚合已登记会话工作区，以固定线程池和 attempt 上限接管过期 Lease；管理端可查看状态并触发即时扫描。
 - Docker Compose：包含 EchoWeave + PostgreSQL + pgvector 的部署形态。
 
 可恢复执行的当前边界和后续幂等设计见

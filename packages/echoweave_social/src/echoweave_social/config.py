@@ -53,6 +53,10 @@ class EchoWeaveConfig:
     bot_ids: tuple[str, ...] = ()
     admin_only_commands: tuple[str, ...] = ()
     approval_timeout_seconds: int = 3600
+    orphan_recovery_enabled: bool = False
+    orphan_recovery_scan_interval_seconds: float = 30.0
+    orphan_recovery_max_per_scan: int = 4
+    orphan_recovery_max_attempts_per_turn: int = 3
     harness_audit_enabled: bool = True
     harness_audit_path: Path | None = None
     harness_policy: dict[str, Any] | None = None
@@ -112,6 +116,14 @@ class EchoWeaveConfig:
             "bot_ids": _env("BOT_IDS"),
             "admin_only_commands": _env("ADMIN_ONLY_COMMANDS"),
             "approval_timeout_seconds": _env("APPROVAL_TIMEOUT_SECONDS"),
+            "orphan_recovery_enabled": _env("ORPHAN_RECOVERY_ENABLED"),
+            "orphan_recovery_scan_interval_seconds": _env(
+                "ORPHAN_RECOVERY_SCAN_INTERVAL_SECONDS"
+            ),
+            "orphan_recovery_max_per_scan": _env("ORPHAN_RECOVERY_MAX_PER_SCAN"),
+            "orphan_recovery_max_attempts_per_turn": _env(
+                "ORPHAN_RECOVERY_MAX_ATTEMPTS_PER_TURN"
+            ),
             "harness_audit_enabled": _env("HARNESS_AUDIT_ENABLED"),
             "harness_audit_path": _env("HARNESS_AUDIT_PATH"),
         }
@@ -165,6 +177,19 @@ class EchoWeaveConfig:
             bot_ids=_str_tuple(data.get("bot_ids")),
             admin_only_commands=_str_tuple(data.get("admin_only_commands")),
             approval_timeout_seconds=_int(data.get("approval_timeout_seconds"), default=3600),
+            orphan_recovery_enabled=_bool(data.get("orphan_recovery_enabled"), default=False),
+            orphan_recovery_scan_interval_seconds=max(
+                0.1,
+                _float(data.get("orphan_recovery_scan_interval_seconds"), default=30.0),
+            ),
+            orphan_recovery_max_per_scan=max(
+                1,
+                _int(data.get("orphan_recovery_max_per_scan"), default=4),
+            ),
+            orphan_recovery_max_attempts_per_turn=max(
+                2,
+                _int(data.get("orphan_recovery_max_attempts_per_turn"), default=3),
+            ),
             harness_audit_enabled=_bool(data.get("harness_audit_enabled"), default=True),
             harness_audit_path=_path(data.get("harness_audit_path")),
             harness_policy=data.get("harness_policy") if isinstance(data.get("harness_policy"), dict) else None,

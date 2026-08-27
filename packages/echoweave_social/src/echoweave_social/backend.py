@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
 from echoweave_ai import register_ai_providers_from_config
+from echoweave_agent_core import OrphanRecoveryConfig
 from echoweave_harness.audit import configure_audit, read_audit_events, record_audit
 from echoweave_harness.feedback import suggest_harness_improvements, write_eval_fixtures, write_feedback_backlog
 from echoweave_harness.metrics import compute_harness_metrics
@@ -14,6 +16,7 @@ from echoweave_harness.policy import configure_harness_policy
 from echoweave_runtime.events import InboundMessage, OutboundMessage
 from echoweave_social.access_control import AccessDecision, AccessPolicy, DEFAULT_ADMIN_ONLY_COMMANDS
 from echoweave_social.agent_runtime import SocialAgentConfig, EchoWeaveSocialAgent
+from echoweave_social.recovery import SocialRecoveryController
 
 
 KEEP_EXISTING_API_KEY = "__ECHOWEAVE_KEEP_EXISTING_API_KEY__"
@@ -61,6 +64,10 @@ class EchoWeaveBackendConfig:
     bot_ids: tuple[str, ...] = ()
     admin_only_commands: tuple[str, ...] = DEFAULT_ADMIN_ONLY_COMMANDS
     approval_timeout_seconds: int = 3600
+    orphan_recovery_enabled: bool = False
+    orphan_recovery_scan_interval_seconds: float = 30.0
+    orphan_recovery_max_per_scan: int = 4
+    orphan_recovery_max_attempts_per_turn: int = 3
     harness_audit_enabled: bool = True
     harness_audit_path: Path | None = None
     harness_policy: dict[str, Any] | None = None
@@ -69,9 +76,28 @@ class EchoWeaveBackendConfig:
 class EchoWeaveBackend:
     """Bridge from EchoWeave events into the embedded agent runtime."""
 
+    name = "agent-backend"
+
     def __init__(self, config: EchoWeaveBackendConfig) -> None:
+        self._lifecycle_lock = threading.RLock()
+        self._started = False
+        self._recovery: SocialRecoveryController | None = None
         self._config = config
         self._apply_config(config)
+
+    def start(self) -> None:
+        with self._lifecycle_lock:
+            if self._started:
+                return
+            self._started = True
+            self._start_recovery_locked()
+
+    def stop(self) -> None:
+        with self._lifecycle_lock:
+            if not self._started:
+                return
+            self._stop_recovery_locked()
+            self._started = False
 
     def _apply_config(self, config: EchoWeaveBackendConfig) -> None:
         audit_path = (
@@ -169,11 +195,45 @@ class EchoWeaveBackend:
             "ok": True,
             "service": "EchoWeave",
             "config": config,
+            "recovery": self.recovery_status(),
             "approvals": {
                 "pending": pending_count,
                 "recent": approvals[:20],
             },
         }
+
+    def recovery_status(self) -> dict[str, object]:
+        with self._lifecycle_lock:
+            recovery = self._recovery
+            enabled = self._config.orphan_recovery_enabled
+            started = self._started
+            if recovery is None:
+                return {
+                    "enabled": enabled,
+                    "backend_started": started,
+                    "running": False,
+                    "config": self._recovery_config_payload(),
+                    "stats": {},
+                    "recent_results": [],
+                }
+            return {
+                "enabled": enabled,
+                "backend_started": started,
+                **recovery.status(),
+            }
+
+    def scan_recovery(self, *, schedule: bool = True) -> dict[str, object]:
+        with self._lifecycle_lock:
+            recovery = self._recovery
+            ephemeral = recovery is None
+            if recovery is None:
+                recovery = self._build_recovery_controller()
+            result = recovery.scan_now(schedule=schedule and not ephemeral)
+            return {
+                "ok": True,
+                "enabled": self._config.orphan_recovery_enabled,
+                **result,
+            }
 
     def admin_config(self) -> dict[str, object]:
         data = asdict(self._config)
@@ -277,6 +337,10 @@ class EchoWeaveBackend:
             "bot_ids",
             "admin_only_commands",
             "approval_timeout_seconds",
+            "orphan_recovery_enabled",
+            "orphan_recovery_scan_interval_seconds",
+            "orphan_recovery_max_per_scan",
+            "orphan_recovery_max_attempts_per_turn",
             "harness_audit_enabled",
             "harness_audit_path",
             "harness_policy",
@@ -304,6 +368,12 @@ class EchoWeaveBackend:
                 updates[key] = tuple(str(item).strip() for item in value if str(item).strip()) if isinstance(value, list) else ()
             elif key == "approval_timeout_seconds":
                 updates[key] = max(1, int(value or 3600))
+            elif key == "orphan_recovery_scan_interval_seconds":
+                updates[key] = max(0.1, float(value or 30.0))
+            elif key == "orphan_recovery_max_per_scan":
+                updates[key] = max(1, int(value or 4))
+            elif key == "orphan_recovery_max_attempts_per_turn":
+                updates[key] = max(2, int(value or 3))
             elif key in {"rag_query_rewrite_max_queries", "rag_rerank_candidate_multiplier"}:
                 updates[key] = max(1, int(value or 1))
             elif key in {"rag_vector_weight", "rag_bm25_weight", "rag_rerank_original_score_weight", "rag_rerank_bm25_weight"}:
@@ -311,10 +381,52 @@ class EchoWeaveBackend:
             else:
                 updates[key] = value
         if updates:
-            self._config = replace(self._config, **updates)
-            self._apply_config(self._config)
-            self._persist_config(updates)
+            with self._lifecycle_lock:
+                restart_recovery = self._started
+                if restart_recovery:
+                    self._stop_recovery_locked()
+                self._config = replace(self._config, **updates)
+                self._apply_config(self._config)
+                if restart_recovery:
+                    self._start_recovery_locked()
+                self._persist_config(updates)
         return self.admin_config()
+
+    def _build_recovery_controller(self) -> SocialRecoveryController:
+        return SocialRecoveryController(
+            self._agent,
+            OrphanRecoveryConfig(
+                scan_interval_seconds=self._config.orphan_recovery_scan_interval_seconds,
+                max_concurrent_recoveries=1,
+                max_recoveries_per_scan=self._config.orphan_recovery_max_per_scan,
+                max_attempts_per_turn=self._config.orphan_recovery_max_attempts_per_turn,
+            ),
+        )
+
+    def _start_recovery_locked(self) -> None:
+        if (
+            not self._started
+            or not self._config.orphan_recovery_enabled
+            or self._recovery is not None
+        ):
+            return
+        recovery = self._build_recovery_controller()
+        recovery.start()
+        self._recovery = recovery
+
+    def _stop_recovery_locked(self) -> None:
+        recovery = self._recovery
+        self._recovery = None
+        if recovery is not None:
+            recovery.stop()
+
+    def _recovery_config_payload(self) -> dict[str, object]:
+        return {
+            "scan_interval_seconds": self._config.orphan_recovery_scan_interval_seconds,
+            "max_concurrent_recoveries": 1,
+            "max_recoveries_per_scan": self._config.orphan_recovery_max_per_scan,
+            "max_attempts_per_turn": self._config.orphan_recovery_max_attempts_per_turn,
+        }
 
     def _persist_config(self, updates: dict[str, object]) -> None:
         if self._config.config_path is None:

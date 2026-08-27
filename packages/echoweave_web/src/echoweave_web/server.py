@@ -182,6 +182,16 @@ class HubWebhookServer:
                     summary = _call_backend(backend, "audit_summary") or {"ok": True, "event_count": 0}
                     self._write_json(200, dict(summary))
                     return
+                if parsed.path == "/api/recovery":
+                    if not self._admin_authorized(webhook_token, allow_url_token=allow_url_token):
+                        self._write_json(401, {"ok": False, "error": "Unauthorized"})
+                        return
+                    recovery = _call_backend(backend, "recovery_status") or {
+                        "enabled": False,
+                        "running": False,
+                    }
+                    self._write_json(200, {"ok": True, "recovery": recovery})
+                    return
                 if parsed.path == "/api/config":
                     if not self._admin_authorized(webhook_token, allow_url_token=allow_url_token):
                         self._write_json(401, {"ok": False, "error": "Unauthorized"})
@@ -248,6 +258,17 @@ class HubWebhookServer:
                             feedback_log=payload.get("feedback_log"),
                             eval_out=payload.get("eval_out"),
                         ) or {"ok": True}
+                        self._write_json(200, dict(result))
+                        return
+                    if parsed.path == "/api/recovery/scan":
+                        if not self._admin_authorized(webhook_token, allow_url_token=allow_url_token):
+                            self._write_json(401, {"ok": False, "error": "Unauthorized"})
+                            return
+                        result = _call_backend(backend, "scan_recovery", schedule=True) or {
+                            "ok": True,
+                            "candidates": [],
+                            "issues": [],
+                        }
                         self._write_json(200, dict(result))
                         return
                     if parsed.path == "/api/command":
@@ -542,7 +563,14 @@ class HubWebhookServer:
 
     def serve(self, host: str = "127.0.0.1", port: int = 8787) -> None:
         web_gateway = HttpServerComponent(self, host, port)
-        runtime = RuntimeHost().register(web_gateway)
+        runtime = RuntimeHost()
+        if (
+            isinstance(getattr(self.backend, "name", None), str)
+            and callable(getattr(self.backend, "start", None))
+            and callable(getattr(self.backend, "stop", None))
+        ):
+            runtime.register(self.backend)  # type: ignore[arg-type]
+        runtime.register(web_gateway)
         try:
             with runtime:
                 bound_host, bound_port = web_gateway.address

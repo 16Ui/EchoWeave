@@ -72,6 +72,13 @@ class SocialAgentConfig:
     harness_policy: HarnessPolicy | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SocialRecoveryContext:
+    conversation_key: str
+    workspace: Path
+    session_path: Path
+
+
 class EchoWeaveSocialAgent:
     """Small social-platform facade over the embedded EchoWeave runtime."""
 
@@ -178,35 +185,6 @@ class EchoWeaveSocialAgent:
                 timeout_seconds=self.config.approval_timeout_seconds,
             )
         }
-        extensions = build_extension_manager(
-            workspace,
-            rag_backend=self.config.rag_backend,
-            rag_pgvector_dsn=self.config.rag_pgvector_dsn,
-            rag_pgvector_table=self.config.rag_pgvector_table,
-            rag_embedding_model=self.config.rag_embedding_model,
-            rag_auto_index=self.config.rag_auto_index,
-            rag_vector_weight=self.config.rag_vector_weight,
-            rag_bm25_weight=self.config.rag_bm25_weight,
-            rag_query_rewrite_enabled=self.config.rag_query_rewrite_enabled,
-            rag_query_rewrite_strategy=self.config.rag_query_rewrite_strategy,
-            rag_query_rewrite_max_queries=self.config.rag_query_rewrite_max_queries,
-            rag_rerank_enabled=self.config.rag_rerank_enabled,
-            rag_rerank_strategy=self.config.rag_rerank_strategy,
-            rag_rerank_candidate_multiplier=self.config.rag_rerank_candidate_multiplier,
-            rag_rerank_original_score_weight=self.config.rag_rerank_original_score_weight,
-            rag_rerank_bm25_weight=self.config.rag_rerank_bm25_weight,
-            enabled_skills=self._enabled_skills(message),
-        )
-        registry = build_registry(
-            workspace,
-            extensions=extensions,
-            approval_callback=lambda command, reason, run_cwd=None: self._request_approval(
-                message,
-                command,
-                reason,
-                Path(run_cwd).resolve() if run_cwd is not None else workspace,
-            ),
-        )
         provider_name, model_name = self._selected_provider_model(message)
         started = time.perf_counter()
         record_audit(
@@ -219,28 +197,7 @@ class EchoWeaveSocialAgent:
             metadata={"provider": provider_name, "model": model_name, "prompt_chars": len(prompt), "rag_enabled": self._rag_enabled(message)},
         )
         try:
-            model_client, capabilities = self._model(message)
-            core = AgentCore.from_config(
-                AgentCoreConfig(
-                    model_client=model_client,
-                    tool_registry=registry,
-                    session_store=session_store,
-                    extensions=extensions,
-                    compact_keep_tail=self.config.compact_keep_tail,
-                    tool_execution_mode=self.config.tool_execution_mode,  # type: ignore[arg-type]
-                    provider_capabilities=capabilities,
-                    retrieval_enabled=self._rag_enabled(message),
-                    metadata={
-                        "conversation_id": message.conversation_key,
-                        "actor_id": message.sender_id,
-                        "workspace": str(workspace),
-                        "provider": provider_name,
-                        "model": model_name,
-                        "rag_enabled": self._rag_enabled(message),
-                        "tool_execution_mode": self.config.tool_execution_mode,
-                    },
-                )
-            )
+            core = self._build_core(message, workspace, session_store)
             outcome = core.execute_turn(
                 TurnRequest(
                     prompt=prompt,
@@ -316,6 +273,114 @@ class EchoWeaveSocialAgent:
             runtime_session_id=header.id,
             runtime_session_path=str(session_path),
             metadata={"workspace": str(workspace)},
+        )
+
+    def recovery_contexts(self) -> tuple[SocialRecoveryContext, ...]:
+        contexts: list[SocialRecoveryContext] = []
+        for conversation_key, record in self.state.session_records().items():
+            raw_session = record.get("runtime_session")
+            if not isinstance(raw_session, str) or not raw_session.strip():
+                continue
+            session_path = Path(raw_session).expanduser().resolve()
+            if not session_path.exists() or not session_path.is_file():
+                continue
+            sessions_dir = session_path.parent
+            if sessions_dir.name != "sessions" or sessions_dir.parent.name != "echoweave-data":
+                continue
+            workspace = sessions_dir.parent.parent.resolve()
+            contexts.append(
+                SocialRecoveryContext(
+                    conversation_key=conversation_key,
+                    workspace=workspace,
+                    session_path=session_path,
+                )
+            )
+        contexts.sort(key=lambda item: (str(item.workspace), item.conversation_key))
+        return tuple(contexts)
+
+    def build_recovery_core(self, session_path: Path) -> AgentCore:
+        resolved = session_path.expanduser().resolve()
+        matches = [
+            item for item in self.recovery_contexts() if item.session_path == resolved
+        ]
+        if not matches:
+            raise ValueError(f"no social conversation owns recovery session: {resolved}")
+        if len(matches) > 1:
+            owners = ", ".join(item.conversation_key for item in matches)
+            raise ValueError(f"multiple social conversations own recovery session {resolved}: {owners}")
+        context = matches[0]
+        platform, separator, conversation_id = context.conversation_key.partition(":")
+        if not separator or not platform or not conversation_id:
+            raise ValueError(f"invalid social conversation key: {context.conversation_key}")
+        message = SocialMessage(
+            platform=platform,
+            conversation_id=conversation_id,
+            sender_id="automatic-recovery",
+            text="automatic orphan recovery",
+        )
+        return self._build_core(
+            message,
+            context.workspace,
+            SessionStore(context.session_path.parent),
+        )
+
+    def _build_core(
+        self,
+        message: SocialMessage,
+        workspace: Path,
+        session_store: SessionStore,
+    ) -> AgentCore:
+        extensions = build_extension_manager(
+            workspace,
+            rag_backend=self.config.rag_backend,
+            rag_pgvector_dsn=self.config.rag_pgvector_dsn,
+            rag_pgvector_table=self.config.rag_pgvector_table,
+            rag_embedding_model=self.config.rag_embedding_model,
+            rag_auto_index=self.config.rag_auto_index,
+            rag_vector_weight=self.config.rag_vector_weight,
+            rag_bm25_weight=self.config.rag_bm25_weight,
+            rag_query_rewrite_enabled=self.config.rag_query_rewrite_enabled,
+            rag_query_rewrite_strategy=self.config.rag_query_rewrite_strategy,
+            rag_query_rewrite_max_queries=self.config.rag_query_rewrite_max_queries,
+            rag_rerank_enabled=self.config.rag_rerank_enabled,
+            rag_rerank_strategy=self.config.rag_rerank_strategy,
+            rag_rerank_candidate_multiplier=self.config.rag_rerank_candidate_multiplier,
+            rag_rerank_original_score_weight=self.config.rag_rerank_original_score_weight,
+            rag_rerank_bm25_weight=self.config.rag_rerank_bm25_weight,
+            enabled_skills=self._enabled_skills(message),
+        )
+        registry = build_registry(
+            workspace,
+            extensions=extensions,
+            approval_callback=lambda command, reason, run_cwd=None: self._request_approval(
+                message,
+                command,
+                reason,
+                Path(run_cwd).resolve() if run_cwd is not None else workspace,
+            ),
+        )
+        provider_name, model_name = self._selected_provider_model(message)
+        model_client, capabilities = self._model(message)
+        return AgentCore.from_config(
+            AgentCoreConfig(
+                model_client=model_client,
+                tool_registry=registry,
+                session_store=session_store,
+                extensions=extensions,
+                compact_keep_tail=self.config.compact_keep_tail,
+                tool_execution_mode=self.config.tool_execution_mode,  # type: ignore[arg-type]
+                provider_capabilities=capabilities,
+                retrieval_enabled=self._rag_enabled(message),
+                metadata={
+                    "conversation_id": message.conversation_key,
+                    "actor_id": message.sender_id,
+                    "workspace": str(workspace),
+                    "provider": provider_name,
+                    "model": model_name,
+                    "rag_enabled": self._rag_enabled(message),
+                    "tool_execution_mode": self.config.tool_execution_mode,
+                },
+            )
         )
 
     def _model(self, message: SocialMessage):

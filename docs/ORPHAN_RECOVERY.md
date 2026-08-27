@@ -57,6 +57,35 @@ with host:
 
 Coding Agent 可以通过 `agent.build_recovery_scheduler(config)` 创建同一个组件。`stop()` 会先停止扫描，再取消尚未开始的任务，并等待已经开始的恢复结束，避免 Runtime Host 关闭后仍悄悄启动新 attempt。
 
+## Web / Social 控制面
+
+长运行 Web 服务会把 `EchoWeaveBackend` 注册到 `RuntimeHost`，由 Backend 持有一个进程级
+`SocialRecoveryController`。它不会为每个工作区创建常驻线程，而是在每轮扫描时读取社交状态中的
+`conversation -> runtime_session` 映射，按 Sessions 根目录聚合扫描：
+
+- 只把仍由当前社交会话登记的 Session 交给自动恢复；
+- 同一 Session 若被多个会话重复登记，会产生 `AmbiguousRecoverySession` 告警并拒绝自动恢复；
+- 同一 Sessions 根目录只扫描一次；
+- 每个 Candidate 恢复前按会话当前模型、RAG、Skill 和 Workspace 配置重建独立 `AgentCore`；
+- 同目录中未映射到当前会话的 Orphan 只产生 `UnmanagedRecoverySession` 告警，不自动运行；
+- 修改恢复配置时，Backend 在生命周期锁内停止旧调度器，再按新配置重建，避免两个本地调度器重叠。
+
+自动调度默认关闭，可通过 JSON 配置或环境变量开启：
+
+| JSON 配置 | 环境变量 | 默认值 | 作用 |
+| --- | --- | ---: | --- |
+| `orphan_recovery_enabled` | `ECHOWEAVE_ORPHAN_RECOVERY_ENABLED` | `false` | 是否随 Web/Social Backend 启动调度器 |
+| `orphan_recovery_scan_interval_seconds` | `ECHOWEAVE_ORPHAN_RECOVERY_SCAN_INTERVAL_SECONDS` | `30.0` | 周期扫描间隔 |
+| `orphan_recovery_max_per_scan` | `ECHOWEAVE_ORPHAN_RECOVERY_MAX_PER_SCAN` | `4` | 单轮最多提交数 |
+| `orphan_recovery_max_attempts_per_turn` | `ECHOWEAVE_ORPHAN_RECOVERY_MAX_ATTEMPTS_PER_TURN` | `3` | 同一逻辑 Turn 的 attempt 上限 |
+
+管理端提供两条需要管理员会话鉴权的接口：
+
+- `GET /api/recovery`：返回启用状态、生命周期状态、累计计数与最近恢复结果；
+- `POST /api/recovery/scan`：立即检查当前登记的会话；仅当常驻调度器正在运行时才唤醒调度执行，关闭状态下保持只读。
+
+管理页面可以热更新上述配置。`orphan_recovery_enabled=false` 时仍允许管理员做一次只读扫描，便于先观察候选和告警，再决定是否启用自动接管。
+
 ## 并发控制
 
 - 一个 daemon dispatcher thread 周期扫描 Session；

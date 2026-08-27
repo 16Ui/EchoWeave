@@ -50,6 +50,17 @@ class SocialStateStore:
             self._state["global"] = settings
         return settings
 
+    def session_records(self) -> dict[str, dict[str, Any]]:
+        """Return a detached projection for background inspection."""
+        sessions = self._state.get("sessions")
+        if not isinstance(sessions, dict):
+            return {}
+        return {
+            str(key): dict(value)
+            for key, value in sessions.items()
+            if isinstance(key, str) and isinstance(value, dict)
+        }
+
     def approvals(self) -> dict[str, Any]:
         approvals = self._state.setdefault("approvals", {})
         if not isinstance(approvals, dict):

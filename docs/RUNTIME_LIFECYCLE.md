@@ -5,7 +5,7 @@ Provider 和 Plugin 应沿用同一协议，不再由各入口自行拼接清理
 
 Execution Lease heartbeat 由进程内唯一调度线程统一维护，而不是每个 Turn 创建一个线程。协调器按 SessionStore root 复用；它们属于并发基础设施，不代表跨进程的唯一 owner。跨进程所有权只由持久化 Lease 和 fencing token 决定。
 
-`OrphanRecoveryScheduler` 是第二个可选生命周期组件：一个 dispatcher thread 负责扫描，固定大小 worker pool 负责恢复。关闭时先停止新扫描，再等待已开始的恢复结束。
+`OrphanRecoveryScheduler` 是第二个可选生命周期组件：一个 dispatcher thread 负责扫描，固定大小 worker pool 负责恢复。长运行 Web/Social 入口先注册 Agent Backend、再注册 Web Gateway，因此启动时恢复调度先就绪，关闭时先停止接收请求、再等待已开始的恢复结束。
 
 ## 生命周期契约
 
@@ -34,7 +34,7 @@ class LifecycleComponent(Protocol):
 阻塞服务和 socket 释放，再交给 `RuntimeHost` 管理。这使 CLI 入口只负责配置和组装，资源所有权
 留在运行时层。
 
-需要长期运行和进程崩溃恢复时，可在 Web/Channel 组件之前注册 `OrphanRecoveryScheduler`。它默认不隐式启动，避免一次性 CLI 因扫描历史会话而产生意外副作用。
+需要长期运行和进程崩溃恢复时，可在 Web/Channel 组件之前注册 `OrphanRecoveryScheduler`。Web/Social Backend 已通过自身生命周期封装这个顺序；自动恢复仍默认关闭，避免一次性 CLI 或新部署未经确认便扫描并推进历史会话。
 
 ## 后续接入顺序
 

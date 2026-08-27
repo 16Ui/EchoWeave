@@ -84,6 +84,10 @@ def init(
         "bot_ids": [],
         "admin_only_commands": ["approve", "approvals", "bind", "deny", "rag:index", "retry", "revoke", "skill:global"],
         "approval_timeout_seconds": 3600,
+        "orphan_recovery_enabled": False,
+        "orphan_recovery_scan_interval_seconds": 30.0,
+        "orphan_recovery_max_per_scan": 4,
+        "orphan_recovery_max_attempts_per_turn": 3,
         "harness_audit_enabled": True,
         "harness_audit_path": str(base_dir / "logs" / "audit.jsonl"),
         "harness_policy": {

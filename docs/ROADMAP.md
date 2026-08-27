@@ -14,7 +14,7 @@ EchoWeave 的主线是可扩展的个人 Agent Runtime。实习经验只用于�
 
 - [已完成] 建立 `InboundMessage` / `OutboundMessage` / `Attachment` 规范模型，移除主链重复 DTO；
 - [已完成] 使用版本化 `AgentEvent` 统一 Web SSE 与 Runtime JSONL 信封，预留工具、流式、失败和取消事件；
-- [已完成首个切片] 增加 Runtime Host，落实顺序启动、逆序关闭、失败回滚，并接入 Web Gateway；
+- [已完成首个切片] 增加 Runtime Host，落实顺序启动、逆序关闭、失败回滚，并接入 Agent Backend 与 Web Gateway；
 - 将 Channel、Provider、Plugin 逐步接入统一生命周期；
 - 将入口层与 Agent Loop 解耦；
 - [已完成首个切片] 为异常、取消、超时建立 Turn 状态机、结构化 Outcome、失败分类与持久化状态事件；
@@ -50,6 +50,6 @@ EchoWeave 的主线是可扩展的个人 Agent Runtime。实习经验只用于�
 - [进行中] 插件和 Provider 故障注入：Provider 单元与 Runtime 集成路径已覆盖；
 - [已完成首个切片] 并行工具批次部分完成、durable reuse、安全重试与成员冲突故障注入；
 - [已完成首个切片] 多线程竞争、跨进程锁、heartbeat、过期 Lease takeover 与 stale owner fencing；
-- [已完成首个切片] orphan 扫描、固定恢复线程池、attempt 上限、扫描故障隔离与持有 Lease 后状态重校验；
+- [已完成首个切片] orphan 扫描、固定恢复线程池、attempt 上限、扫描故障隔离、持有 Lease 后状态重校验，以及 Web/Social 多工作区控制面；
 - Golden Set、回归阈值和 CI 门禁；
 - 架构说明、演示视频和性能/可靠性报告。
